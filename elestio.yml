@@ -1,0 +1,45 @@
+config:
+  runTime: "dockerCompose"
+  version: ""
+  framework: "fastapi"
+  installCommand: ""
+  buildCommand: "docker-compose -f docker-compose.prod.yml build"
+  buildDir: "/"
+  runCommand: "docker-compose -f docker-compose.prod.yml up -d"
+  isMonoRepoPackageInRoot: false
+
+environments:
+  - key: "DATABASE_URL"
+    value: "postgresql+asyncpg://user:password@zervi-pgvector:5432/ai_brain"
+  - key: "PGVECTOR_URI"
+    value: "postgresql+asyncpg://user:password@zervi-pgvector:5432/ai_brain"
+  - key: "OPENAI_API_KEY"
+    value: ""
+  - key: "EMBEDDING_MODEL"
+    value: "text-embedding-3-small"
+  - key: "EMBEDDING_DIM"
+    value: "1536"
+  - key: "DEEPSEEK_API_KEY"
+    value: ""
+  - key: "DEEPSEEK_BASE_URL"
+    value: "https://api.deepseek.com/v1"
+  - key: "DEEPSEEK_MODEL"
+    value: "deepseek-chat"
+  - key: "AI_ASSISTANT_SECRET"
+    value: "change-me-in-production"
+
+ports:
+  - protocol: "HTTPS"
+    targetProtocol: "HTTP"
+    listeningPort: "443"
+    targetPort: "8000"
+    targetIP: "172.17.0.1"
+    public: true
+    path: "/"
+    isAuth: false
+    login: ""
+    password: ""
+
+webUI:
+  - url: "https://[CI_CD_DOMAIN]/docs"
+    label: "API Docs"
