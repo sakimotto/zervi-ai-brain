@@ -21,6 +21,7 @@ from .config import (
     DEEPSEEK_BASE_URL,
     DEEPSEEK_MODEL,
     OPENAI_API_KEY,
+    OPENAI_BASE_URL,
 )
 from .db import AsyncSessionLocal, engine, get_db
 
@@ -99,7 +100,7 @@ _SUGGEST_PROMPT = (
 
 openai_client: Optional[AsyncOpenAI] = None
 if OPENAI_API_KEY:
-    openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
 
 
 # ------------------------------------------------------------------

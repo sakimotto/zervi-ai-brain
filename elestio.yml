@@ -15,6 +15,8 @@ environments:
     value: "postgresql+asyncpg://user:password@zervi-pgvector:5432/ai_brain"
   - key: "OPENAI_API_KEY"
     value: ""
+  - key: "OPENAI_BASE_URL"
+    value: "https://api.openai.com/v1"
   - key: "EMBEDDING_MODEL"
     value: "text-embedding-3-small"
   - key: "EMBEDDING_DIM"

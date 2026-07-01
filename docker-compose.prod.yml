@@ -10,6 +10,7 @@ services:
       - DATABASE_URL=${DATABASE_URL}
       - PGVECTOR_URI=${PGVECTOR_URI:-${DATABASE_URL}}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-text-embedding-3-small}
       - EMBEDDING_DIM=${EMBEDDING_DIM:-1536}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
