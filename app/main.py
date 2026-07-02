@@ -7,6 +7,8 @@ from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
 import httpx
+from alembic import command
+from alembic.config import Config as AlembicConfig
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from openai import AsyncOpenAI
@@ -152,6 +154,70 @@ async def _embed_text(text: str) -> Optional[List[float]]:
         return None
 
 
+def _chunk_text(text: str, chunk_size: int = 1000, overlap: int = 100) -> List[str]:
+    """Split long text into overlapping chunks for embedding."""
+    if not text:
+        return []
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunks.append(text[start:end])
+        if end >= len(text):
+            break
+        start = end - overlap
+    return chunks
+
+
+async def _retrieve_knowledge(
+    db: AsyncSession, user_id: int, query: str, message_id_to_skip: Any = None
+) -> Dict[str, Any]:
+    """Retrieve relevant past messages, documents, and facts for a query."""
+    snippets: List[str] = []
+    sources: List[Dict[str, Any]] = []
+    embedding = await _embed_text(query)
+    if not embedding:
+        return {"snippets": snippets, "sources": sources}
+
+    # Past messages
+    similar_messages = await crud.search_similar_messages(db, user_id, embedding, limit=5)
+    for msg, distance in similar_messages:
+        if message_id_to_skip and msg.id == message_id_to_skip:
+            continue
+        if distance is not None and distance < 0.4:
+            snippets.append(f"Past conversation - {msg.role}: {msg.content}")
+
+    # Documents
+    similar_docs = await crud.search_similar_documents(db, embedding, limit=5)
+    for doc, distance in similar_docs:
+        if distance is not None and distance < 0.4:
+            snippets.append(f"Document [{doc.source}] {doc.title}:\n{doc.content}")
+            sources.append(
+                {
+                    "type": "document",
+                    "source": doc.source,
+                    "title": doc.title,
+                    "distance": distance,
+                }
+            )
+
+    # Facts
+    similar_facts = await crud.search_similar_facts(db, user_id, embedding, limit=5)
+    for fact, distance in similar_facts:
+        if distance is not None and distance < 0.4:
+            snippets.append(f"Known fact ({fact.category}) - {fact.key}: {fact.value}")
+            sources.append(
+                {
+                    "type": "fact",
+                    "category": fact.category,
+                    "key": fact.key,
+                    "distance": distance,
+                }
+            )
+
+    return {"snippets": snippets, "sources": sources}
+
+
 def _build_context_message(context: Dict[str, Any]) -> Dict[str, str]:
     ctx = context or {}
     lines = [f"{k}: {v}" for k, v in ctx.items()]
@@ -163,6 +229,15 @@ def _build_context_message(context: Dict[str, Any]) -> Dict[str, str]:
 # ------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Run any pending DB migrations on startup.
+    try:
+        alembic_cfg = AlembicConfig("alembic.ini")
+        command.upgrade(alembic_cfg, "head")
+    except Exception:
+        # Migrations may fail if the DB is temporarily unreachable. Log and
+        # continue; the health endpoint will report the real DB status.
+        pass
+
     # Seed the default agent + skills on startup.
     async with AsyncSessionLocal() as db:
         try:
@@ -239,16 +314,9 @@ async def chat(
         recent_db_messages = await crud.get_recent_messages(db, str(session.id), limit=50)
         recent_db_messages = list(reversed(recent_db_messages))  # chronological
 
-        relevant_snippets: List[str] = []
-        user_embedding = await _embed_text(req.message)
-        if user_embedding:
-            similar = await crud.search_similar_messages(db, req.user_id, user_embedding, limit=5)
-            for msg, distance in similar:
-                # Skip messages already in the recent history to avoid duplication.
-                if msg.id == user_message.id:
-                    continue
-                if distance is not None and distance < 0.35:
-                    relevant_snippets.append(f"{msg.role}: {msg.content}")
+        knowledge = await _retrieve_knowledge(db, req.user_id, req.message, message_id_to_skip=user_message.id)
+        relevant_snippets = knowledge["snippets"]
+        source_citations = knowledge["sources"]
 
         # Build LLM messages.
         messages: List[Dict[str, str]] = [{"role": "system", "content": agent.system_prompt}]
@@ -270,10 +338,14 @@ async def chat(
             messages.append(_build_context_message(req.context))
 
         if relevant_snippets:
+            citation_instruction = (
+                "\n\nWhen you use the retrieved information above, cite the source in your answer "
+                "using a short tag like [doc:source:title] or [fact:category:key]."
+            )
             messages.append(
                 {
                     "role": "system",
-                    "content": "Relevant past conversation snippets:\n" + "\n".join(relevant_snippets),
+                    "content": "Retrieved knowledge:\n" + "\n---\n".join(relevant_snippets) + citation_instruction,
                 }
             )
 
@@ -317,6 +389,7 @@ async def chat(
             reply=parsed.get("reply"),
             tool_request=parsed.get("tool_request"),
             session_id=str(session.id),
+            sources=source_citations,
         )
     except HTTPException:
         raise
@@ -409,3 +482,107 @@ async def list_sessions(
     _check_secret(x_ai_assistant_secret)
     sessions = await crud.get_sessions_for_user(db, user_id)
     return [schemas.SessionOut.model_validate(s) for s in sessions]
+
+
+# ------------------------------------------------------------------
+# Documents
+# ------------------------------------------------------------------
+@app.post("/documents", response_model=schemas.DocumentOut)
+async def create_document(
+    req: schemas.DocumentCreate,
+    x_ai_assistant_secret: Optional[str] = Header(None),
+    db: AsyncSession = Depends(get_db),
+) -> schemas.DocumentOut:
+    _check_secret(x_ai_assistant_secret)
+    chunks = _chunk_text(req.content)
+    # For small content, store as a single document. For long content, store the
+    # first chunk and accept that future improvements may store all chunks.
+    content_to_store = chunks[0] if chunks else req.content
+    embedding = await _embed_text(content_to_store)
+    doc = await crud.create_document(
+        db,
+        source=req.source,
+        title=req.title,
+        content=content_to_store,
+        content_type=req.content_type,
+        embedding=embedding,
+        metadata=req.metadata,
+    )
+    return schemas.DocumentOut.model_validate(doc)
+
+
+@app.get("/documents", response_model=List[schemas.DocumentOut])
+async def list_documents(
+    source: Optional[str] = None,
+    content_type: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+    x_ai_assistant_secret: Optional[str] = Header(None),
+    db: AsyncSession = Depends(get_db),
+) -> List[schemas.DocumentOut]:
+    _check_secret(x_ai_assistant_secret)
+    docs = await crud.list_documents(db, source=source, content_type=content_type, limit=limit, offset=offset)
+    return [schemas.DocumentOut.model_validate(d) for d in docs]
+
+
+@app.delete("/documents/{doc_id}")
+async def delete_document(
+    doc_id: str,
+    x_ai_assistant_secret: Optional[str] = Header(None),
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    _check_secret(x_ai_assistant_secret)
+    deleted = await crud.delete_document(db, doc_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return {"deleted": True}
+
+
+# ------------------------------------------------------------------
+# Facts
+# ------------------------------------------------------------------
+@app.post("/facts", response_model=schemas.FactOut)
+async def create_fact(
+    req: schemas.FactCreate,
+    user_id: int,
+    x_ai_assistant_secret: Optional[str] = Header(None),
+    db: AsyncSession = Depends(get_db),
+) -> schemas.FactOut:
+    _check_secret(x_ai_assistant_secret)
+    embedding = await _embed_text(f"{req.category} {req.key} {req.value}")
+    fact = await crud.create_fact(
+        db,
+        user_id=user_id,
+        category=req.category,
+        key=req.key,
+        value=req.value,
+        embedding=embedding,
+    )
+    return schemas.FactOut.model_validate(fact)
+
+
+@app.get("/facts", response_model=List[schemas.FactOut])
+async def list_facts(
+    user_id: int,
+    category: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+    x_ai_assistant_secret: Optional[str] = Header(None),
+    db: AsyncSession = Depends(get_db),
+) -> List[schemas.FactOut]:
+    _check_secret(x_ai_assistant_secret)
+    facts = await crud.list_facts(db, user_id=user_id, category=category, limit=limit, offset=offset)
+    return [schemas.FactOut.model_validate(f) for f in facts]
+
+
+@app.delete("/facts/{fact_id}")
+async def delete_fact(
+    fact_id: str,
+    x_ai_assistant_secret: Optional[str] = Header(None),
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    _check_secret(x_ai_assistant_secret)
+    deleted = await crud.delete_fact(db, fact_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Fact not found")
+    return {"deleted": True}

@@ -257,3 +257,145 @@ async def search_similar_messages(
         .limit(limit)
     )
     return result.all()
+
+
+# ------------------------------------------------------------------
+# Documents
+# ------------------------------------------------------------------
+async def create_document(
+    db: AsyncSession,
+    source: str,
+    title: str,
+    content: str,
+    content_type: str,
+    embedding: Optional[List[float]],
+    metadata: Optional[Dict[str, Any]] = None,
+) -> models.Document:
+    doc = models.Document(
+        source=source,
+        title=title,
+        content=content,
+        content_type=content_type,
+        embedding=embedding,
+        metadata_json=metadata or {},
+    )
+    db.add(doc)
+    await db.commit()
+    await db.refresh(doc)
+    return doc
+
+
+async def list_documents(
+    db: AsyncSession,
+    source: Optional[str] = None,
+    content_type: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> Sequence[models.Document]:
+    query = select(models.Document).order_by(models.Document.created_at.desc())
+    if source:
+        query = query.where(models.Document.source == source)
+    if content_type:
+        query = query.where(models.Document.content_type == content_type)
+    result = await db.execute(query.limit(limit).offset(offset))
+    return result.scalars().all()
+
+
+async def get_document(db: AsyncSession, doc_id: str) -> Optional[models.Document]:
+    try:
+        did = uuid.UUID(doc_id)
+    except ValueError:
+        return None
+    result = await db.execute(select(models.Document).where(models.Document.id == did))
+    return result.scalar_one_or_none()
+
+
+async def delete_document(db: AsyncSession, doc_id: str) -> bool:
+    doc = await get_document(db, doc_id)
+    if not doc:
+        return False
+    await db.delete(doc)
+    await db.commit()
+    return True
+
+
+async def search_similar_documents(
+    db: AsyncSession,
+    embedding: List[float],
+    limit: int = 5,
+) -> Sequence[Tuple[models.Document, float]]:
+    result = await db.execute(
+        select(models.Document, models.Document.embedding.cosine_distance(embedding).label("distance"))
+        .where(models.Document.embedding.isnot(None))
+        .order_by("distance")
+        .limit(limit)
+    )
+    return result.all()
+
+
+# ------------------------------------------------------------------
+# Facts
+# ------------------------------------------------------------------
+async def create_fact(
+    db: AsyncSession,
+    user_id: int,
+    category: str,
+    key: str,
+    value: str,
+    embedding: Optional[List[float]] = None,
+) -> models.Fact:
+    fact = models.Fact(
+        user_id=user_id,
+        category=category,
+        key=key,
+        value=value,
+        embedding=embedding,
+    )
+    db.add(fact)
+    await db.commit()
+    await db.refresh(fact)
+    return fact
+
+
+async def list_facts(
+    db: AsyncSession,
+    user_id: int,
+    category: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> Sequence[models.Fact]:
+    query = select(models.Fact).where(models.Fact.user_id == user_id).order_by(models.Fact.created_at.desc())
+    if category:
+        query = query.where(models.Fact.category == category)
+    result = await db.execute(query.limit(limit).offset(offset))
+    return result.scalars().all()
+
+
+async def delete_fact(db: AsyncSession, fact_id: str) -> bool:
+    try:
+        fid = uuid.UUID(fact_id)
+    except ValueError:
+        return False
+    result = await db.execute(select(models.Fact).where(models.Fact.id == fid))
+    fact = result.scalar_one_or_none()
+    if not fact:
+        return False
+    await db.delete(fact)
+    await db.commit()
+    return True
+
+
+async def search_similar_facts(
+    db: AsyncSession,
+    user_id: int,
+    embedding: List[float],
+    limit: int = 5,
+) -> Sequence[Tuple[models.Fact, float]]:
+    result = await db.execute(
+        select(models.Fact, models.Fact.embedding.cosine_distance(embedding).label("distance"))
+        .where(models.Fact.user_id == user_id)
+        .where(models.Fact.embedding.isnot(None))
+        .order_by("distance")
+        .limit(limit)
+    )
+    return result.all()

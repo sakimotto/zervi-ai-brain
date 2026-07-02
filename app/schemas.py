@@ -23,6 +23,7 @@ class ChatResponse(BaseModel):
     reply: Optional[str] = None
     tool_request: Optional[Dict[str, Any]] = None
     session_id: Optional[str] = None
+    sources: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
 
 
 class SuggestRequest(BaseModel):
@@ -63,3 +64,47 @@ class SessionOut(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True, "json_encoders": {uuid.UUID: str}}
+
+
+class DocumentCreate(BaseModel):
+    source: str
+    title: str
+    content: str
+    content_type: str = "text"
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class DocumentOut(BaseModel):
+    id: uuid.UUID
+    source: str
+    title: str
+    content_type: str
+    metadata: Dict[str, Any]
+    created_at: datetime
+
+    model_config = {"from_attributes": True, "json_encoders": {uuid.UUID: str}}
+
+
+class FactCreate(BaseModel):
+    category: str = "general"
+    key: str
+    value: str
+
+
+class FactOut(BaseModel):
+    id: uuid.UUID
+    user_id: int
+    category: str
+    key: str
+    value: str
+    created_at: datetime
+
+    model_config = {"from_attributes": True, "json_encoders": {uuid.UUID: str}}
+
+
+class SearchResult(BaseModel):
+    source: str
+    title: str
+    content: str
+    metadata: Dict[str, Any]
+    distance: Optional[float] = None

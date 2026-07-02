@@ -86,3 +86,28 @@ class MessageEmbedding(Base):
     embedding = Column(Vector(EMBEDDING_DIM), nullable=False)
 
     message = relationship("ChatMessage", back_populates="embedding")
+
+
+class Document(Base):
+    __tablename__ = "documents"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    source = Column(String(255), nullable=False, index=True)
+    title = Column(String(500), nullable=False, default="")
+    content = Column(Text, nullable=False)
+    content_type = Column(String(50), nullable=False, default="text")
+    embedding = Column(Vector(EMBEDDING_DIM), nullable=True)
+    metadata_json = Column(JSONB, nullable=False, default=dict)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
+
+
+class Fact(Base):
+    __tablename__ = "facts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(Integer, nullable=False, index=True)
+    category = Column(String(100), nullable=False, default="general")
+    key = Column(String(255), nullable=False)
+    value = Column(Text, nullable=False)
+    embedding = Column(Vector(EMBEDDING_DIM), nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)
