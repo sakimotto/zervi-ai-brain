@@ -78,8 +78,9 @@ class DocumentOut(BaseModel):
     id: uuid.UUID
     source: str
     title: str
+    content: str
     content_type: str
-    metadata: Dict[str, Any]
+    metadata_json: Dict[str, Any]
     created_at: datetime
 
     model_config = {"from_attributes": True, "json_encoders": {uuid.UUID: str}}
