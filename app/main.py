@@ -96,9 +96,10 @@ _DEFAULT_SYSTEM_PROMPT = (
 _SUGGEST_PROMPT = (
     "\n\n"
     "Proactive suggestion mode — you are looking at the user's current screen. "
-    "Recommend the single most useful next action they could take on this record. "
-    "Only recommend an action if it is clearly appropriate based on the visible record state. "
-    "Be concise (one short sentence).\n\n"
+    "Recommend the single most useful next action they could take. "
+    "Only recommend an action if it is clearly appropriate based on the visible records and state. "
+    "If specific records are visible, mention their names or reference numbers. "
+    "Be concise but specific (one short sentence).\n\n"
     "You must respond with ONLY a JSON object in this exact format:\n"
     '{"suggestion": "short recommendation text", "tool_request": null}\n\n'
     "If the recommendation maps to one of the available actions, include a tool_request using res_model, res_id, and confirmation_message for high-risk actions:\n"
