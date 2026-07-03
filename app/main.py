@@ -190,7 +190,7 @@ async def _retrieve_knowledge(
             snippets.append(f"Past conversation - {msg.role}: {msg.content}")
 
     # Documents
-    similar_docs = await crud.search_similar_documents(db, embedding, limit=5)
+    similar_docs = await crud.search_similar_documents(db, embedding, limit=10)
     seen_doc_groups = set()
     for doc, distance in similar_docs:
         if distance is not None and distance < 0.4:
