@@ -305,13 +305,14 @@ async def ensure_department_knowledge(
     db: AsyncSession,
     embed_fn: Any,
 ) -> None:
-    """Seed sample RAG documents and facts if the knowledge base is empty."""
+    """Seed sample RAG documents and facts, skipping duplicates."""
     return await seed_data.seed_department_knowledge(
         db,
         embed_fn=embed_fn,
         create_document=create_document,
         create_fact=create_fact,
-        count_documents=count_documents,
+        list_documents=list_documents,
+        list_facts=list_facts,
     )
 
 

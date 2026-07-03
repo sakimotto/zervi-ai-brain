@@ -328,13 +328,18 @@ async def seed_department_knowledge(
     embed_fn: Callable[[str], Coroutine[Any, Any, Optional[List[float]]]],
     create_document: Callable[..., Coroutine[Any, Any, Any]],
     create_fact: Callable[..., Coroutine[Any, Any, Any]],
-    count_documents: Callable[..., Coroutine[Any, Any, int]],
+    list_documents: Callable[..., Coroutine[Any, Any, Sequence[Any]]],
+    list_facts: Callable[..., Coroutine[Any, Any, Sequence[Any]]],
 ) -> None:
-    """Seed sample RAG documents and facts if the knowledge base is empty."""
-    if await count_documents(db) > 0:
-        return
+    """Seed sample RAG documents and facts, skipping ones that already exist."""
+    existing_docs = await list_documents(db, limit=10000)
+    existing_doc_keys = {
+        (getattr(d, "source", None), getattr(d, "title", None)) for d in existing_docs
+    }
 
     for doc in DEPARTMENT_DOCUMENTS:
+        if (doc["source"], doc["title"]) in existing_doc_keys:
+            continue
         embedding = await embed_fn(doc["content"])
         await create_document(
             db,
@@ -347,7 +352,13 @@ async def seed_department_knowledge(
         )
 
     # Seed facts under a shared system user (user_id = 1) so every user can retrieve them.
+    existing_facts = await list_facts(db, user_id=1, limit=10000)
+    existing_fact_keys = {
+        (getattr(f, "category", None), getattr(f, "key", None)) for f in existing_facts
+    }
     for fact in DEPARTMENT_FACTS:
+        if (fact["category"], fact["key"]) in existing_fact_keys:
+            continue
         embedding = await embed_fn(fact["value"])
         await create_fact(
             db,
