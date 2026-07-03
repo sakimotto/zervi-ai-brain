@@ -251,10 +251,11 @@ async def lifespan(app: FastAPI):
         # continue; the health endpoint will report the real DB status.
         pass
 
-    # Seed the default agent + skills on startup.
+    # Seed the default agent + skills + department knowledge on startup.
     async with AsyncSessionLocal() as db:
         try:
             await crud.ensure_default_agent_and_skills(db, _DEFAULT_SYSTEM_PROMPT)
+            await crud.ensure_department_knowledge(db, _embed_text)
         except SQLAlchemyError:
             # If the DB is not yet migrated, seeding will fail. The app still
             # starts so that health checks and migration tooling work.
