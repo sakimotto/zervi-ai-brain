@@ -6,6 +6,7 @@ import os
 import re
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import httpx
@@ -604,8 +605,19 @@ async def suggest(
         if not agent:
             raise HTTPException(status_code=500, detail="No AI agent configured")
 
+        system_content = agent.system_prompt + _SUGGEST_PROMPT
+        if req.refresh:
+            system_content += (
+                "\n\nThe user has explicitly asked for a fresh suggestion. "
+                "Recommend a different useful next action than before."
+            )
+        if req.last_suggestion:
+            system_content += (
+                f"\n\nPrevious suggestion (do not repeat it): {req.last_suggestion}"
+            )
+
         messages: List[Dict[str, str]] = [
-            {"role": "system", "content": agent.system_prompt + _SUGGEST_PROMPT}
+            {"role": "system", "content": system_content}
         ]
 
         if req.context:
@@ -621,6 +633,7 @@ async def suggest(
                 "model": DEEPSEEK_MODEL,
                 "messages": messages,
                 "max_tokens": 512,
+                "temperature": 0.8 if req.refresh else 0.3,
             },
             timeout=60.0,
         )
@@ -628,6 +641,17 @@ async def suggest(
         data = response.json()
         raw_reply = data["choices"][0]["message"]["content"]
         parsed = _parse_suggestion(raw_reply)
+
+        if req.session_id and parsed.get("suggestion"):
+            await crud.update_session_metadata(
+                db,
+                req.session_id,
+                {
+                    "last_suggestion": parsed["suggestion"],
+                    "last_suggestion_at": datetime.utcnow().isoformat(),
+                },
+            )
+
         return schemas.SuggestResponse(**parsed)
     except HTTPException:
         raise

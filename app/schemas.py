@@ -31,6 +31,8 @@ class SuggestRequest(BaseModel):
     session_id: Optional[str] = None
     agent_id: int = 1
     context: Dict[str, Any] = Field(default_factory=dict)
+    refresh: bool = False
+    last_suggestion: Optional[str] = None
 
 
 class SuggestResponse(BaseModel):
