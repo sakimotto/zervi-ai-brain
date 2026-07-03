@@ -31,6 +31,15 @@ async def get_default_agent(db: AsyncSession) -> Optional[models.AIAgent]:
     return result.scalar_one_or_none()
 
 
+async def get_agents(db: AsyncSession, active_only: bool = True) -> Sequence[models.AIAgent]:
+    query = select(models.AIAgent).options(selectinload(models.AIAgent.skills))
+    if active_only:
+        query = query.where(models.AIAgent.is_active.is_(True))
+    query = query.order_by(models.AIAgent.id)
+    result = await db.execute(query)
+    return result.scalars().all()
+
+
 async def ensure_default_agent_and_skills(db: AsyncSession, default_prompt: str) -> models.AIAgent:
     """Idempotently seed a default Saki agent and the standard tool skills."""
     result = await db.execute(select(models.AIAgent).where(models.AIAgent.id == 1))

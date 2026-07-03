@@ -460,6 +460,16 @@ async def suggest(
         raise HTTPException(status_code=500, detail=f"Unexpected error: {exc}")
 
 
+@app.get("/agents", response_model=List[schemas.AgentOut])
+async def list_agents(
+    x_ai_assistant_secret: Optional[str] = Header(None),
+    db: AsyncSession = Depends(get_db),
+) -> List[schemas.AgentOut]:
+    _check_secret(x_ai_assistant_secret)
+    agents = await crud.get_agents(db, active_only=True)
+    return [schemas.AgentOut.model_validate(a) for a in agents]
+
+
 @app.get("/agents/{agent_id}", response_model=schemas.AgentOut)
 async def get_agent_config(
     agent_id: int,
