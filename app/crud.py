@@ -114,6 +114,21 @@ async def ensure_default_agent_and_skills(db: AsyncSession, default_prompt: str)
                 }
             ],
         },
+        {
+            "name": "Search_Tools",
+            "tool_schemas_json": [
+                {
+                    "tool": "search_records",
+                    "description": "Search Odoo records by model and domain and return a compact summary.",
+                    "params": {
+                        "res_model": "string",
+                        "domain": "list of domain tuples, e.g. [['state','=','draft']]",
+                        "limit": "integer (optional, default 20)",
+                        "fields": "list of field names to read (optional)",
+                    },
+                }
+            ],
+        },
     ]
 
     skill_records: List[models.AISkill] = []
