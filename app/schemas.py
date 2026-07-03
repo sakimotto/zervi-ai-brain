@@ -56,6 +56,13 @@ class AgentOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class AgentCreate(BaseModel):
+    name: str
+    system_prompt: str
+    is_active: bool = True
+    skill_ids: Optional[List[int]] = Field(default_factory=list)
+
+
 class SessionOut(BaseModel):
     id: uuid.UUID
     user_id: int

@@ -40,6 +40,38 @@ async def get_agents(db: AsyncSession, active_only: bool = True) -> Sequence[mod
     return result.scalars().all()
 
 
+async def create_agent(
+    db: AsyncSession,
+    name: str,
+    system_prompt: str,
+    is_active: bool = True,
+    skill_ids: Optional[List[int]] = None,
+) -> models.AIAgent:
+    agent = models.AIAgent(
+        name=name,
+        system_prompt=system_prompt,
+        is_active=is_active,
+    )
+    db.add(agent)
+    await db.flush()
+
+    if skill_ids:
+        for skill_id in skill_ids:
+            await db.execute(
+                insert(models.AgentSkillLink).values(agent_id=agent.id, skill_id=skill_id)
+            )
+        await db.flush()
+
+    await db.commit()
+    # Reload with skills.
+    result = await db.execute(
+        select(models.AIAgent)
+        .where(models.AIAgent.id == agent.id)
+        .options(selectinload(models.AIAgent.skills))
+    )
+    return result.scalar_one()
+
+
 async def ensure_default_agent_and_skills(db: AsyncSession, default_prompt: str) -> models.AIAgent:
     """Idempotently seed a default Saki agent and the standard tool skills."""
     result = await db.execute(select(models.AIAgent).where(models.AIAgent.id == 1))
@@ -129,6 +161,34 @@ async def ensure_default_agent_and_skills(db: AsyncSession, default_prompt: str)
                 }
             ],
         },
+        {
+            "name": "Purchasing_Tools",
+            "tool_schemas_json": [
+                {
+                    "tool": "confirm_purchase_order",
+                    "description": "Confirm a purchase order quotation.",
+                    "params": {
+                        "res_model": "purchase.order",
+                        "res_id": "integer",
+                        "confirmation_message": "string",
+                    },
+                }
+            ],
+        },
+        {
+            "name": "Invoicing_Tools",
+            "tool_schemas_json": [
+                {
+                    "tool": "create_invoice",
+                    "description": "Create a customer invoice from a confirmed sales order.",
+                    "params": {
+                        "res_model": "sale.order",
+                        "res_id": "integer",
+                        "confirmation_message": "string",
+                    },
+                }
+            ],
+        },
     ]
 
     skill_records: List[models.AISkill] = []
@@ -143,6 +203,8 @@ async def ensure_default_agent_and_skills(db: AsyncSession, default_prompt: str)
             db.add(skill)
             await db.flush()
         skill_records.append(skill)
+
+    skill_by_name = {skill.name: skill for skill in skill_records}
 
     if not agent:
         agent = models.AIAgent(
@@ -166,9 +228,81 @@ async def ensure_default_agent_and_skills(db: AsyncSession, default_prompt: str)
                 insert(models.AgentSkillLink).values(agent_id=agent.id, skill_id=skill.id)
             )
 
+    # Seed sample departmental agents for Zervi Asia.
+    department_agents = [
+        {
+            "name": "Sales Agent",
+            "system_prompt": (
+                "You are the Zervi Sales Agent. Focus on sales orders, quotations, customers, and invoicing. "
+                "Help users review quotes, confirm sales orders, create invoices, and follow up with customers. "
+                "Only perform actions when explicitly asked, and always ask for confirmation on high-risk steps."
+            ),
+            "skill_names": ["Low_Risk_Tools", "Sales_Tools", "Invoicing_Tools", "Search_Tools"],
+        },
+        {
+            "name": "Purchasing Agent",
+            "system_prompt": (
+                "You are the Zervi Purchasing Agent. Focus on purchase orders, suppliers, and receipts. "
+                "Help users review RFQs, confirm purchase orders, track incoming goods, and follow up with vendors. "
+                "Only perform actions when explicitly asked, and always ask for confirmation on high-risk steps."
+            ),
+            "skill_names": ["Low_Risk_Tools", "Purchasing_Tools", "Search_Tools"],
+        },
+        {
+            "name": "Accounting Agent",
+            "system_prompt": (
+                "You are the Zervi Accounting Agent. Focus on invoices, payments, journal entries, and reconciliation. "
+                "Help users review unpaid invoices, post notes, and find supporting records. "
+                "Do not post or reconcile transactions unless the user explicitly confirms, and defer tax/compliance judgments to a human."
+            ),
+            "skill_names": ["Low_Risk_Tools", "Invoicing_Tools", "Search_Tools"],
+        },
+        {
+            "name": "Warehouse Agent",
+            "system_prompt": (
+                "You are the Zervi Warehouse Agent. Focus on stock pickings, deliveries, receipts, and inventory moves. "
+                "Help users check ready transfers, validate pickings, and trace stock status. "
+                "Only perform actions when explicitly asked, and always ask for confirmation on high-risk steps."
+            ),
+            "skill_names": ["Low_Risk_Tools", "Inventory_Tools", "Search_Tools"],
+        },
+        {
+            "name": "Manufacturing Agent",
+            "system_prompt": (
+                "You are the Zervi Manufacturing Agent. Focus on manufacturing orders, BOMs, work centers, and production output. "
+                "Help users review MOs, mark orders done, and follow up on shop-floor tasks. "
+                "Only perform actions when explicitly asked, and always ask for confirmation on high-risk steps."
+            ),
+            "skill_names": ["Low_Risk_Tools", "Manufacturing_Tools", "Search_Tools"],
+        },
+    ]
+
+    for dept in department_agents:
+        result = await db.execute(select(models.AIAgent).where(models.AIAgent.name == dept["name"]))
+        dept_agent = result.scalar_one_or_none()
+        if not dept_agent:
+            dept_agent = models.AIAgent(
+                name=dept["name"],
+                system_prompt=dept["system_prompt"],
+                is_active=True,
+            )
+            db.add(dept_agent)
+            await db.flush()
+
+        link_result = await db.execute(
+            select(models.AgentSkillLink.skill_id).where(models.AgentSkillLink.agent_id == dept_agent.id)
+        )
+        linked_skill_ids = {row[0] for row in link_result.all()}
+        for skill_name in dept["skill_names"]:
+            skill = skill_by_name.get(skill_name)
+            if skill and skill.id not in linked_skill_ids:
+                await db.execute(
+                    insert(models.AgentSkillLink).values(agent_id=dept_agent.id, skill_id=skill.id)
+                )
+
     await db.commit()
 
-    # Return the agent with skills eagerly loaded.
+    # Return the default agent with skills eagerly loaded.
     result = await db.execute(
         select(models.AIAgent)
         .where(models.AIAgent.id == agent.id)

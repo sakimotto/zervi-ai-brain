@@ -84,6 +84,10 @@ _DEFAULT_SYSTEM_PROMPT = (
     '   {"tool": "validate_picking", "params": {"res_model": "stock.picking", "res_id": <integer>, "confirmation_message": "<Explicit summary>"}}\n\n'
     "5. done_manufacturing_order (HIGH RISK - UI will show confirmation card)\n"
     '   {"tool": "done_manufacturing_order", "params": {"res_model": "mrp.production", "res_id": <integer>, "confirmation_message": "<Explicit summary>"}}\n\n'
+    "6. confirm_purchase_order (HIGH RISK - UI will show confirmation card)\n"
+    '   {"tool": "confirm_purchase_order", "params": {"res_model": "purchase.order", "res_id": <integer>, "confirmation_message": "<Explicit summary>"}}\n\n'
+    "7. create_invoice (HIGH RISK - UI will show confirmation card)\n"
+    '   {"tool": "create_invoice", "params": {"res_model": "sale.order", "res_id": <integer>, "confirmation_message": "<Explicit summary>"}}\n\n'
     "For actions on multiple selected records, replace `res_id` with `res_ids` (array of integers) and set res_model accordingly.\n\n"
     "If the user's intent is genuinely unclear, ask for clarification in one concise sentence. Interpret obvious typos and shorthand."
 )
@@ -475,6 +479,23 @@ async def list_agents(
     _check_secret(x_ai_assistant_secret)
     agents = await crud.get_agents(db, active_only=True)
     return [schemas.AgentOut.model_validate(a) for a in agents]
+
+
+@app.post("/agents", response_model=schemas.AgentOut)
+async def create_agent(
+    req: schemas.AgentCreate,
+    x_ai_assistant_secret: Optional[str] = Header(None),
+    db: AsyncSession = Depends(get_db),
+) -> schemas.AgentOut:
+    _check_secret(x_ai_assistant_secret)
+    agent = await crud.create_agent(
+        db,
+        name=req.name,
+        system_prompt=req.system_prompt,
+        is_active=req.is_active,
+        skill_ids=req.skill_ids,
+    )
+    return schemas.AgentOut.model_validate(agent)
 
 
 @app.get("/agents/{agent_id}", response_model=schemas.AgentOut)
