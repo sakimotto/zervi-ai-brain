@@ -1,5 +1,6 @@
 """Zervi AI Brain — Phase 1: persistent memory, agents, skills, semantic search."""
 
+import asyncio
 import json
 import os
 import re
@@ -511,9 +512,18 @@ async def create_document(
     _check_secret(x_ai_assistant_secret)
     chunks = _chunk_text(req.content)
     group_id = str(uuid.uuid4())
+
+    # Embed chunks concurrently with a small concurrency limit.
+    semaphore = asyncio.Semaphore(5)
+
+    async def _embed_chunk(text: str) -> Optional[List[float]]:
+        async with semaphore:
+            return await _embed_text(text)
+
+    embeddings = await asyncio.gather(*[_embed_chunk(chunk) for chunk in chunks])
+
     stored_docs = []
-    for idx, chunk in enumerate(chunks):
-        embedding = await _embed_text(chunk)
+    for idx, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
         metadata = dict(req.metadata or {})
         metadata.update(
             {
