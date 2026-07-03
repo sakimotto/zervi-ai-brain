@@ -6,13 +6,14 @@ import os
 import re
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import httpx
 from alembic import command
 from alembic.config import Config as AlembicConfig
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from openai import AsyncOpenAI
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -413,6 +414,171 @@ async def chat(
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Unexpected error: {exc}")
+
+
+# ------------------------------------------------------------------
+# Streaming chat endpoint
+# ------------------------------------------------------------------
+async def _stream_chat(
+    db: AsyncSession,
+    req: schemas.ChatRequest,
+) -> AsyncGenerator[str, None]:
+    """Internal generator that yields SSE events for a streaming chat reply."""
+    if not DEEPSEEK_API_KEY:
+        yield _sse_event("error", "DeepSeek API key is not configured")
+        return
+
+    agent = await crud.get_agent(db, req.agent_id)
+    if not agent:
+        agent = await crud.get_default_agent(db)
+    if not agent:
+        yield _sse_event("error", "No AI agent configured")
+        return
+
+    # Resolve or create session.
+    if req.session_id:
+        session = await crud.get_session(db, req.session_id)
+        if not session:
+            yield _sse_event("error", "Session not found")
+            return
+    else:
+        session = await crud.create_session(db, req.user_id, req.context)
+
+    # Persist the user's message.
+    user_message = await crud.add_message(
+        db, str(session.id), "user", req.message, token_count=None
+    )
+
+    # Fetch recent history and relevant semantic memory.
+    recent_db_messages = await crud.get_recent_messages(db, str(session.id), limit=50)
+    recent_db_messages = list(reversed(recent_db_messages))
+
+    knowledge = await _retrieve_knowledge(
+        db, req.user_id, req.message, message_id_to_skip=user_message.id
+    )
+    relevant_snippets = knowledge["snippets"]
+    source_citations = knowledge["sources"]
+
+    messages: List[Dict[str, str]] = [{"role": "system", "content": agent.system_prompt}]
+
+    tool_schema_blocks: List[str] = []
+    for skill in agent.skills:
+        for schema in skill.tool_schemas_json:
+            tool_schema_blocks.append(json.dumps(schema))
+    if tool_schema_blocks:
+        messages.append(
+            {
+                "role": "system",
+                "content": "Available tool schemas:\n" + "\n".join(tool_schema_blocks),
+            }
+        )
+
+    if req.context:
+        messages.append(_build_context_message(req.context))
+
+    if relevant_snippets:
+        citation_instruction = (
+            "\n\nWhen you use the retrieved information above, cite the source in your answer "
+            "using a short tag like [doc:source:title] or [fact:category:key]."
+        )
+        messages.append(
+            {
+                "role": "system",
+                "content": "Retrieved knowledge:\n" + "\n---\n".join(relevant_snippets) + citation_instruction,
+            }
+        )
+
+    for msg in recent_db_messages:
+        messages.append({"role": msg.role, "content": msg.content})
+
+    messages.append({"role": "user", "content": req.message})
+
+    # Stream from DeepSeek.
+    full_reply = ""
+    try:
+        async with httpx.AsyncClient() as client:
+            async with client.stream(
+                "POST",
+                f"{DEEPSEEK_BASE_URL}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": DEEPSEEK_MODEL,
+                    "messages": messages,
+                    "max_tokens": 1024,
+                    "stream": True,
+                },
+                timeout=60.0,
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[len("data:"):].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError:
+                        continue
+                    delta = chunk.get("choices", [{}])[0].get("delta", {})
+                    token = delta.get("content") or ""
+                    if token:
+                        full_reply += token
+                        yield _sse_event("token", token)
+    except httpx.HTTPStatusError as exc:
+        yield _sse_event("error", f"DeepSeek API error: {exc.response.status_code}")
+        return
+    except Exception as exc:
+        yield _sse_event("error", f"Unexpected error: {exc}")
+        return
+
+    parsed = _parse_reply(full_reply)
+    assistant_content = parsed.get("reply") or json.dumps(parsed.get("tool_request"))
+    assistant_message = await crud.add_message(
+        db, str(session.id), "assistant", assistant_content, token_count=None
+    )
+
+    for text, msg_record in ((req.message, user_message), (assistant_content, assistant_message)):
+        embedding = await _embed_text(text)
+        if embedding:
+            await crud.save_embedding(db, str(msg_record.id), embedding)
+
+    if parsed.get("tool_request"):
+        yield _sse_event("tool_request", json.dumps(parsed["tool_request"]))
+    else:
+        yield _sse_event("reply", parsed.get("reply") or "")
+
+    yield _sse_event("done", json.dumps({"session_id": str(session.id), "sources": source_citations}))
+
+
+def _sse_event(event: str, data: str) -> str:
+    return f"event: {event}\ndata: {data}\n\n"
+
+
+@app.post("/chat/stream")
+async def chat_stream(
+    req: schemas.ChatRequest,
+    x_ai_assistant_secret: Optional[str] = Header(None),
+) -> StreamingResponse:
+    _check_secret(x_ai_assistant_secret)
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        async with AsyncSessionLocal() as db:
+            async for event in _stream_chat(db, req):
+                yield event
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/suggest", response_model=schemas.SuggestResponse)
