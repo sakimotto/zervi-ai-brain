@@ -1,13 +1,11 @@
 name: Deploy Brain to Production
 
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    environment: production
     steps:
       - name: Deploy to Elestio
         uses: appleboy/ssh-action@v1.0.3
