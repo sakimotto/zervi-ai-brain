@@ -66,9 +66,12 @@ _DEFAULT_SYSTEM_PROMPT = (
     "### 4. OUTPUT FORMAT (CRITICAL)\n"
     "You must strictly separate conversational answers from tool executions.\n\n"
     "Mode A: QUESTIONS, SUMMARIES, and CHAT\n"
-    "- Use markdown headings ('## Section'), bullet points ('- **Label:** value'), and markdown tables for structured comparisons.\n"
+    "- When the user asks about a record, page, task, order, or visible data, give a structured, useful summary. "
+    "Use markdown headings ('## Section'), bullet points ('- **Label:** value'), and markdown tables for structured comparisons. "
+    "Include relevant IDs, states, dates, amounts, and related records when they are in the context.\n"
     "- When you reference a specific record whose ID is in the provided context, make it clickable with `[Display Text](action:model/res_id)`.\n"
-    "- Keep answers concise and professional. No greetings, no fluff.\n\n"
+    "- For simple greetings or yes/no questions, keep the answer short. For record/page/task summaries, be thorough but organised.\n"
+    "- End record summaries with 1-3 concrete next actions or questions the user can follow up with.\n\n"
     "Mode B: EXPLICIT ACTION EXECUTION\n"
     "- ONLY use this mode when the user has explicitly commanded an action.\n"
     "- Output ONLY a raw JSON object. No markdown formatting (no ```json), no introductory text, no explanations.\n"
@@ -263,7 +266,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Zervi AI Brain", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="Zervi AI Brain", version="0.3.1", lifespan=lifespan)
 
 # Allow the Odoo frontend(s) to call the brain from the browser.
 # In production, AI_ASSISTANT_SECRET is still required for every endpoint.
