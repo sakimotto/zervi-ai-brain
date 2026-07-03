@@ -189,17 +189,22 @@ async def _retrieve_knowledge(
 
     # Documents
     similar_docs = await crud.search_similar_documents(db, embedding, limit=5)
+    seen_doc_groups = set()
     for doc, distance in similar_docs:
         if distance is not None and distance < 0.4:
             snippets.append(f"Document [{doc.source}] {doc.title}:\n{doc.content}")
-            sources.append(
-                {
-                    "type": "document",
-                    "source": doc.source,
-                    "title": doc.title,
-                    "distance": distance,
-                }
-            )
+            group_id = (doc.metadata_json or {}).get("group_id")
+            dedupe_key = group_id or str(doc.id)
+            if dedupe_key not in seen_doc_groups:
+                seen_doc_groups.add(dedupe_key)
+                sources.append(
+                    {
+                        "type": "document",
+                        "source": doc.source,
+                        "title": doc.title,
+                        "distance": distance,
+                    }
+                )
 
     # Facts
     similar_facts = await crud.search_similar_facts(db, user_id, embedding, limit=5)
@@ -505,20 +510,31 @@ async def create_document(
 ) -> schemas.DocumentOut:
     _check_secret(x_ai_assistant_secret)
     chunks = _chunk_text(req.content)
-    # For small content, store as a single document. For long content, store the
-    # first chunk and accept that future improvements may store all chunks.
-    content_to_store = chunks[0] if chunks else req.content
-    embedding = await _embed_text(content_to_store)
-    doc = await crud.create_document(
-        db,
-        source=req.source,
-        title=req.title,
-        content=content_to_store,
-        content_type=req.content_type,
-        embedding=embedding,
-        metadata=req.metadata,
-    )
-    return schemas.DocumentOut.model_validate(doc)
+    group_id = str(uuid.uuid4())
+    stored_docs = []
+    for idx, chunk in enumerate(chunks):
+        embedding = await _embed_text(chunk)
+        metadata = dict(req.metadata or {})
+        metadata.update(
+            {
+                "chunk_index": idx,
+                "total_chunks": len(chunks),
+                "group_id": group_id,
+            }
+        )
+        doc = await crud.create_document(
+            db,
+            source=req.source,
+            title=req.title,
+            content=chunk,
+            content_type=req.content_type,
+            embedding=embedding,
+            metadata=metadata,
+        )
+        stored_docs.append(doc)
+    # Return the first chunk as the representative document.
+    representative = stored_docs[0]
+    return schemas.DocumentOut.model_validate(representative)
 
 
 @app.get("/documents", response_model=List[schemas.DocumentOut])
@@ -531,8 +547,20 @@ async def list_documents(
     db: AsyncSession = Depends(get_db),
 ) -> List[schemas.DocumentOut]:
     _check_secret(x_ai_assistant_secret)
-    docs = await crud.list_documents(db, source=source, content_type=content_type, limit=limit, offset=offset)
-    return [schemas.DocumentOut.model_validate(d) for d in docs]
+    docs = await crud.list_documents(db, source=source, content_type=content_type, limit=limit * 4, offset=0)
+    # Group chunk rows by their document group_id and return one representative per document.
+    seen_groups = set()
+    representatives = []
+    for doc in docs:
+        group_id = (doc.metadata_json or {}).get("group_id")
+        if group_id:
+            if group_id in seen_groups:
+                continue
+            seen_groups.add(group_id)
+        representatives.append(doc)
+        if len(representatives) >= limit:
+            break
+    return [schemas.DocumentOut.model_validate(d) for d in representatives]
 
 
 @app.delete("/documents/{doc_id}")
@@ -546,6 +574,19 @@ async def delete_document(
     if not deleted:
         raise HTTPException(status_code=404, detail="Document not found")
     return {"deleted": True}
+
+
+@app.delete("/documents/group/{group_id}")
+async def delete_document_group(
+    group_id: str,
+    x_ai_assistant_secret: Optional[str] = Header(None),
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    _check_secret(x_ai_assistant_secret)
+    deleted = await crud.delete_documents_by_group(db, group_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Document group not found")
+    return {"deleted": True, "count": deleted}
 
 
 # ------------------------------------------------------------------

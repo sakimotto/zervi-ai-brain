@@ -343,6 +343,15 @@ async def delete_document(db: AsyncSession, doc_id: str) -> bool:
     return True
 
 
+async def delete_documents_by_group(db: AsyncSession, group_id: str) -> int:
+    from sqlalchemy import delete
+    result = await db.execute(
+        delete(models.Document).where(models.Document.metadata_json["group_id"].astext == group_id)
+    )
+    await db.commit()
+    return result.rowcount
+
+
 async def search_similar_documents(
     db: AsyncSession,
     embedding: List[float],
