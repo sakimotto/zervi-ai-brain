@@ -5,7 +5,7 @@ from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from . import models
+from . import models, seed_data
 
 
 # ------------------------------------------------------------------
@@ -228,72 +228,28 @@ async def ensure_default_agent_and_skills(db: AsyncSession, default_prompt: str)
                 insert(models.AgentSkillLink).values(agent_id=agent.id, skill_id=skill.id)
             )
 
-    # Seed sample departmental agents for Zervi Asia.
-    department_agents = [
-        {
-            "name": "Sales Agent",
-            "system_prompt": (
-                "You are the Zervi Sales Agent. Focus on sales orders, quotations, customers, and invoicing. "
-                "Help users review quotes, confirm sales orders, create invoices, and follow up with customers. "
-                "Only perform actions when explicitly asked, and always ask for confirmation on high-risk steps."
-            ),
-            "skill_names": ["Low_Risk_Tools", "Sales_Tools", "Invoicing_Tools", "Search_Tools"],
-        },
-        {
-            "name": "Purchasing Agent",
-            "system_prompt": (
-                "You are the Zervi Purchasing Agent. Focus on purchase orders, suppliers, and receipts. "
-                "Help users review RFQs, confirm purchase orders, track incoming goods, and follow up with vendors. "
-                "Only perform actions when explicitly asked, and always ask for confirmation on high-risk steps."
-            ),
-            "skill_names": ["Low_Risk_Tools", "Purchasing_Tools", "Search_Tools"],
-        },
-        {
-            "name": "Accounting Agent",
-            "system_prompt": (
-                "You are the Zervi Accounting Agent. Focus on invoices, payments, journal entries, and reconciliation. "
-                "Help users review unpaid invoices, post notes, and find supporting records. "
-                "Do not post or reconcile transactions unless the user explicitly confirms, and defer tax/compliance judgments to a human."
-            ),
-            "skill_names": ["Low_Risk_Tools", "Invoicing_Tools", "Search_Tools"],
-        },
-        {
-            "name": "Warehouse Agent",
-            "system_prompt": (
-                "You are the Zervi Warehouse Agent. Focus on stock pickings, deliveries, receipts, and inventory moves. "
-                "Help users check ready transfers, validate pickings, and trace stock status. "
-                "Only perform actions when explicitly asked, and always ask for confirmation on high-risk steps."
-            ),
-            "skill_names": ["Low_Risk_Tools", "Inventory_Tools", "Search_Tools"],
-        },
-        {
-            "name": "Manufacturing Agent",
-            "system_prompt": (
-                "You are the Zervi Manufacturing Agent. Focus on manufacturing orders, BOMs, work centers, and production output. "
-                "Help users review MOs, mark orders done, and follow up on shop-floor tasks. "
-                "Only perform actions when explicitly asked, and always ask for confirmation on high-risk steps."
-            ),
-            "skill_names": ["Low_Risk_Tools", "Manufacturing_Tools", "Search_Tools"],
-        },
-    ]
-
-    for dept in department_agents:
-        result = await db.execute(select(models.AIAgent).where(models.AIAgent.name == dept["name"]))
+    # Seed sample departmental agents using the richer prompts in seed_data.py.
+    for name, prompt in seed_data.DEPARTMENT_PROMPTS.items():
+        result = await db.execute(select(models.AIAgent).where(models.AIAgent.name == name))
         dept_agent = result.scalar_one_or_none()
         if not dept_agent:
             dept_agent = models.AIAgent(
-                name=dept["name"],
-                system_prompt=dept["system_prompt"],
+                name=name,
+                system_prompt=prompt,
                 is_active=True,
             )
             db.add(dept_agent)
+            await db.flush()
+        elif dept_agent.system_prompt != prompt:
+            # Keep prompts up to date when seed data changes.
+            dept_agent.system_prompt = prompt
             await db.flush()
 
         link_result = await db.execute(
             select(models.AgentSkillLink.skill_id).where(models.AgentSkillLink.agent_id == dept_agent.id)
         )
         linked_skill_ids = {row[0] for row in link_result.all()}
-        for skill_name in dept["skill_names"]:
+        for skill_name in seed_data.DEPARTMENT_SKILLS.get(name, []):
             skill = skill_by_name.get(skill_name)
             if skill and skill.id not in linked_skill_ids:
                 await db.execute(
@@ -343,6 +299,20 @@ async def get_sessions_for_user(db: AsyncSession, user_id: int) -> Sequence[mode
         .order_by(models.ChatSession.updated_at.desc())
     )
     return result.scalars().all()
+
+
+async def ensure_department_knowledge(
+    db: AsyncSession,
+    embed_fn: Any,
+) -> None:
+    """Seed sample RAG documents and facts if the knowledge base is empty."""
+    return await seed_data.seed_department_knowledge(
+        db,
+        embed_fn=embed_fn,
+        create_document=create_document,
+        create_fact=create_fact,
+        count_documents=count_documents,
+    )
 
 
 # ------------------------------------------------------------------
@@ -484,6 +454,11 @@ async def delete_documents_by_group(db: AsyncSession, group_id: str) -> int:
     )
     await db.commit()
     return result.rowcount
+
+
+async def count_documents(db: AsyncSession) -> int:
+    result = await db.execute(select(models.Document.id))
+    return len(result.scalars().all())
 
 
 async def search_similar_documents(
