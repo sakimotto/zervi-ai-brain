@@ -5,7 +5,7 @@ bootstrap the AI brain for Zervi. It is imported by crud.py during startup
 seeding and can be extended as new departments or policies are added.
 """
 
-from typing import Any, Callable, Coroutine, Dict, List, Optional
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Sequence
 
 DEPARTMENT_PROMPTS: Dict[str, str] = {
     "Sales Agent": """You are the Zervi Sales Agent, an expert inside the Odoo sales workflow.
