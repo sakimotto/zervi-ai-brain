@@ -31,3 +31,16 @@ ALLOWED_ORIGINS = [origin.strip() for origin in _cors_origins.split(",") if orig
 
 # Maximum cosine distance for a snippet/document/fact to be considered relevant.
 SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.4"))
+
+# Rate limits (requests per minute). Set to 0 to disable.
+RATE_LIMIT_CHAT_PER_MINUTE = int(os.getenv("RATE_LIMIT_CHAT_PER_MINUTE", "20"))
+RATE_LIMIT_SUGGEST_PER_MINUTE = int(os.getenv("RATE_LIMIT_SUGGEST_PER_MINUTE", "60"))
+
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+
+import logging
+
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)

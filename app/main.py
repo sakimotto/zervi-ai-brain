@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,7 +15,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 import httpx
 from alembic import command
 from alembic.config import Config as AlembicConfig
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from openai import AsyncOpenAI
@@ -37,6 +38,7 @@ from .config import (
     OPENAI_BASE_URL,
 )
 from .db import AsyncSessionLocal, engine, get_db
+from .rate_limit import check_chat_rate_limit, check_suggest_rate_limit
 
 
 # ------------------------------------------------------------------
@@ -368,6 +370,29 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log every request with a request ID, duration, and status code."""
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    request.state.request_id = request_id
+    start = time.perf_counter()
+
+    response = await call_next(request)
+
+    duration_ms = (time.perf_counter() - start) * 1000
+    response.headers["X-Request-ID"] = request_id
+    logger.info(
+        "method=%s path=%s status=%s duration_ms=%.2f request_id=%s client=%s",
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration_ms,
+        request_id,
+        request.client.host if request.client else None,
+    )
+    return response
+
+
 # ------------------------------------------------------------------
 # Endpoints
 # ------------------------------------------------------------------
@@ -390,10 +415,12 @@ async def health(db: AsyncSession = Depends(get_db)) -> Dict[str, Any]:
 @app.post("/chat", response_model=schemas.ChatResponse)
 async def chat(
     req: schemas.ChatRequest,
+    request: Request,
     x_ai_assistant_secret: Optional[str] = Header(None),
     db: AsyncSession = Depends(get_db),
 ) -> schemas.ChatResponse:
     _check_secret(x_ai_assistant_secret)
+    await check_chat_rate_limit(request, req.user_id)
 
     if not DEEPSEEK_API_KEY:
         raise HTTPException(status_code=500, detail="DeepSeek API key is not configured")
@@ -705,9 +732,11 @@ def _sse_event(event: str, data: str) -> str:
 @app.post("/chat/stream")
 async def chat_stream(
     req: schemas.ChatRequest,
+    request: Request,
     x_ai_assistant_secret: Optional[str] = Header(None),
 ) -> StreamingResponse:
     _check_secret(x_ai_assistant_secret)
+    await check_chat_rate_limit(request, req.user_id)
 
     return StreamingResponse(
         _stream_chat(req),
@@ -723,10 +752,12 @@ async def chat_stream(
 @app.post("/suggest", response_model=schemas.SuggestResponse)
 async def suggest(
     req: schemas.SuggestRequest,
+    request: Request,
     x_ai_assistant_secret: Optional[str] = Header(None),
     db: AsyncSession = Depends(get_db),
 ) -> schemas.SuggestResponse:
     _check_secret(x_ai_assistant_secret)
+    await check_suggest_rate_limit(request, req.user_id)
 
     if not DEEPSEEK_API_KEY:
         raise HTTPException(status_code=500, detail="DeepSeek API key is not configured")
