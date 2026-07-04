@@ -807,9 +807,13 @@ async def suggest(
         data = response.json()
         raw_reply = data["choices"][0]["message"]["content"]
         parsed = _parse_suggestion(raw_reply)
-        validated_tool_request = _validate_tool_request(parsed.get("tool_request"), agent)
+        suggestion_text = (parsed.get("suggestion") or "").strip()
+        if not suggestion_text:
+            suggestion_text = "Ask me anything about your orders, inventory, manufacturing, or accounting."
+        skill_schemas = [skill.tool_schemas_json or [] for skill in agent.skills]
+        validated_tool_request = _validate_tool_request(parsed.get("tool_request"), skill_schemas)
         return schemas.SuggestResponse(
-            suggestion=parsed.get("suggestion", ""),
+            suggestion=suggestion_text,
             tool_request=validated_tool_request,
         )
     except HTTPException:
