@@ -103,13 +103,6 @@ _DEFAULT_SYSTEM_PROMPT = (
     "7. create_invoice (HIGH RISK - UI will show confirmation card)\n"
     '   {"tool": "create_invoice", "params": {"res_model": "sale.order", "res_id": <integer>, "confirmation_message": "<Explicit summary>"}}\n\n'
     "For actions on multiple selected records, replace `res_id` with `res_ids` (array of integers) and set res_model accordingly.\n\n"
-    "Mode C: SKILL WORKFLOW REQUESTS\n"
-    "- Use this mode when the user wants to open a view or start a skill workflow (e.g. \"Where is this stored?\", \"Show stock for this product.\").\n"
-    "- Output ONLY a raw JSON object. No markdown, no prose.\n"
-    "- Use this exact schema: {\"skill\": \"<skill_name>\", \"params\": {<key-value parameters>}}\n"
-    "- Example: {\"skill\": \"locate_stock\", \"params\": {\"product_id\": 123, \"product_name\": \"Neoprene Black\"}}\n"
-    "- If the user refers to a product/record visible on screen, use the `res_id` and `active_model` from the context.\n"
-    "- If you cannot identify a specific product, set product_id to null and include product_name.\n\n"
     "If the user's intent is genuinely unclear, ask for clarification in one concise sentence. Interpret obvious typos and shorthand."
 )
 
@@ -186,27 +179,10 @@ def _extract_json(text: str) -> Optional[Any]:
     return None
 
 
-def _parse_skill_request(text: str) -> Optional[Dict[str, Any]]:
-    data = _extract_json(text)
-    if not isinstance(data, dict):
-        return None
-    if "skill" in data and "params" in data and "tool" not in data:
-        params = data.get("params")
-        if not isinstance(params, dict):
-            params = {}
-        return {"skill": data["skill"], "params": params}
-    return None
-
-
 def _parse_reply(text: str) -> Dict[str, Any]:
     data = _extract_json(text)
-    if isinstance(data, dict):
-        if "skill" in data and "params" in data:
-            skill_request = _parse_skill_request(text)
-            if skill_request:
-                return {"skill_request": skill_request}
-        if "tool" in data and "params" in data:
-            return {"tool_request": data}
+    if isinstance(data, dict) and "tool" in data and "params" in data:
+        return {"tool_request": data}
     return {"reply": text.strip()}
 
 
@@ -560,14 +536,7 @@ async def chat(
         validated_tool_request = _validate_tool_request(parsed.get("tool_request"), agent)
 
         # Persist the assistant reply.
-        if parsed.get("reply"):
-            assistant_content = parsed["reply"]
-        elif parsed.get("skill_request"):
-            assistant_content = json.dumps(parsed["skill_request"])
-        elif validated_tool_request:
-            assistant_content = json.dumps(validated_tool_request)
-        else:
-            assistant_content = ""
+        assistant_content = parsed.get("reply") or json.dumps(validated_tool_request)
         assistant_message = await crud.add_message(
             db, str(session.id), "assistant", assistant_content, token_count=None
         )
@@ -581,7 +550,6 @@ async def chat(
         return schemas.ChatResponse(
             reply=parsed.get("reply"),
             tool_request=validated_tool_request,
-            skill_request=parsed.get("skill_request"),
             session_id=str(session.id),
             sources=source_citations,
         )
@@ -757,14 +725,7 @@ async def _stream_chat(
     # ------------------------------------------------------------------
     parsed = _parse_reply(full_reply)
     validated_tool_request = _validate_tool_request(parsed.get("tool_request"), skill_schemas)
-    if parsed.get("reply"):
-        assistant_content = parsed["reply"]
-    elif parsed.get("skill_request"):
-        assistant_content = json.dumps(parsed["skill_request"])
-    elif validated_tool_request:
-        assistant_content = json.dumps(validated_tool_request)
-    else:
-        assistant_content = ""
+    assistant_content = parsed.get("reply") or json.dumps(validated_tool_request)
 
     async with AsyncSessionLocal() as db:
         assistant_message = await crud.add_message(
@@ -779,9 +740,7 @@ async def _stream_chat(
             if embedding:
                 await crud.save_embedding(db, msg_id, embedding)
 
-    if parsed.get("skill_request"):
-        yield _sse_event("skill_request", json.dumps(parsed["skill_request"]))
-    elif validated_tool_request:
+    if validated_tool_request:
         yield _sse_event("tool_request", json.dumps(validated_tool_request))
     else:
         yield _sse_event("reply", parsed.get("reply") or "")

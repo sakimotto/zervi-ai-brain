@@ -18,15 +18,9 @@ class ChatRequest(BaseModel):
     context: Dict[str, Any] = Field(default_factory=dict)
 
 
-class SkillRequest(BaseModel):
-    skill: str
-    params: Dict[str, Any] = Field(default_factory=dict)
-
-
 class ChatResponse(BaseModel):
     reply: Optional[str] = None
     tool_request: Optional[Dict[str, Any]] = None
-    skill_request: Optional[SkillRequest] = None
     session_id: Optional[str] = None
     sources: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
 

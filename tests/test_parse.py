@@ -1,53 +1,11 @@
 import pytest
 
-from app.main import _parse_reply, _parse_skill_request, _parse_suggestion
-
-
-class TestParseSkillRequest:
-    def test_valid_skill_request(self):
-        text = '{"skill": "locate_stock", "params": {"product_id": 123, "product_name": "Neoprene Black"}}'
-        result = _parse_skill_request(text)
-        assert result == {
-            "skill": "locate_stock",
-            "params": {"product_id": 123, "product_name": "Neoprene Black"},
-        }
-
-    def test_markdown_fences(self):
-        text = "```json\n{\"skill\": \"locate_stock\", \"params\": {\"product_id\": 456}}\n```"
-        result = _parse_skill_request(text)
-        assert result == {"skill": "locate_stock", "params": {"product_id": 456}}
-
-    def test_json_inside_explanatory_text(self):
-        text = (
-            "I will open the stock view for you now. "
-            '{"skill": "locate_stock", "params": {"product_name": "Foam Grey"}}'
-        )
-        result = _parse_skill_request(text)
-        assert result == {"skill": "locate_stock", "params": {"product_name": "Foam Grey"}}
-
-    def test_missing_skill_returns_none(self):
-        text = '{"params": {"product_id": 123}}'
-        assert _parse_skill_request(text) is None
-
-    def test_tool_request_returns_none(self):
-        text = '{"tool": "confirm_sales_order", "params": {"res_id": 1}}'
-        assert _parse_skill_request(text) is None
-
-    def test_plain_text_returns_none(self):
-        assert _parse_skill_request("I am just chatting") is None
+from app.main import _parse_reply, _parse_suggestion
 
 
 class TestParseReply:
     def test_plain_reply(self):
         assert _parse_reply("Hello!") == {"reply": "Hello!"}
-
-    def test_skill_request_priority(self):
-        text = '{"skill": "locate_stock", "params": {"product_id": 123}}'
-        result = _parse_reply(text)
-        assert "skill_request" in result
-        assert result["skill_request"]["skill"] == "locate_stock"
-        assert "tool_request" not in result
-        assert "reply" not in result
 
     def test_tool_request_json(self):
         text = '{"tool": "confirm_sales_order", "params": {"id": 42}}'
@@ -107,3 +65,4 @@ class TestParseSuggestion:
         long_text = "x" * 1000
         result = _parse_suggestion(long_text)
         assert result["suggestion"] == "x" * 500
+        assert result["tool_request"] is None
