@@ -6,7 +6,6 @@ import os
 import re
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import httpx
@@ -641,17 +640,6 @@ async def suggest(
         data = response.json()
         raw_reply = data["choices"][0]["message"]["content"]
         parsed = _parse_suggestion(raw_reply)
-
-        if req.session_id and parsed.get("suggestion"):
-            await crud.update_session_metadata(
-                db,
-                req.session_id,
-                {
-                    "last_suggestion": parsed["suggestion"],
-                    "last_suggestion_at": datetime.utcnow().isoformat(),
-                },
-            )
-
         return schemas.SuggestResponse(**parsed)
     except HTTPException:
         raise
