@@ -110,4 +110,5 @@ class Fact(Base):
     key = Column(String(255), nullable=False)
     value = Column(Text, nullable=False)
     embedding = Column(Vector(EMBEDDING_DIM), nullable=True)
+    is_shared = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)

@@ -14,13 +14,31 @@ jobs:
           ssh-private-key: ${{ secrets.ELESTIO_SSH_KEY }}
           log-public-key: false
 
+      - name: Add host to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.ELESTIO_HOST }} >> ~/.ssh/known_hosts
+
       - name: Deploy to Elestio
         run: |
-          ssh -o StrictHostKeyChecking=no \
-            ${{ secrets.ELESTIO_USER }}@${{ secrets.ELESTIO_HOST }} <<'EOF'
+          ssh ${{ secrets.ELESTIO_USER }}@${{ secrets.ELESTIO_HOST }} <<'EOF'
             set -e
             cd /opt/app/zervi-ai-brain
             git pull origin main
             docker compose -f docker-compose.prod.yml up -d --build
             echo "AI brain deployed and restarted"
           EOF
+
+      - name: Health check
+        run: |
+          for i in {1..12}; do
+            status=$(curl -s -o /dev/null -w "%{http_code}" https://${{ secrets.ELESTIO_HOST }}/health || true)
+            if [ "$status" = "200" ]; then
+              echo "Health check passed"
+              exit 0
+            fi
+            echo "Waiting for health check... ($status)"
+            sleep 5
+          done
+          echo "Health check failed"
+          exit 1

@@ -16,7 +16,6 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     agent_id: int = 1
     context: Dict[str, Any] = Field(default_factory=dict)
-    history: Optional[List[ChatMessage]] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):

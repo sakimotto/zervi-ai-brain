@@ -56,7 +56,16 @@ async def create_agent(
     await db.flush()
 
     if skill_ids:
-        for skill_id in skill_ids:
+        # Validate that every supplied skill exists before linking.
+        skill_ids = list(set(skill_ids))
+        result = await db.execute(
+            select(models.AISkill.id).where(models.AISkill.id.in_(skill_ids))
+        )
+        valid_ids = {row[0] for row in result.all()}
+        invalid_ids = set(skill_ids) - valid_ids
+        if invalid_ids:
+            raise ValueError(f"Invalid skill IDs: {sorted(invalid_ids)}")
+        for skill_id in valid_ids:
             await db.execute(
                 insert(models.AgentSkillLink).values(agent_id=agent.id, skill_id=skill_id)
             )
@@ -486,6 +495,7 @@ async def create_fact(
     key: str,
     value: str,
     embedding: Optional[List[float]] = None,
+    is_shared: bool = False,
 ) -> models.Fact:
     fact = models.Fact(
         user_id=user_id,
@@ -493,6 +503,7 @@ async def create_fact(
         key=key,
         value=value,
         embedding=embedding,
+        is_shared=is_shared,
     )
     db.add(fact)
     await db.commit()
@@ -507,7 +518,11 @@ async def list_facts(
     limit: int = 100,
     offset: int = 0,
 ) -> Sequence[models.Fact]:
-    query = select(models.Fact).where(models.Fact.user_id == user_id).order_by(models.Fact.created_at.desc())
+    query = (
+        select(models.Fact)
+        .where((models.Fact.user_id == user_id) | (models.Fact.is_shared == True))
+        .order_by(models.Fact.created_at.desc())
+    )
     if category:
         query = query.where(models.Fact.category == category)
     result = await db.execute(query.limit(limit).offset(offset))
@@ -536,8 +551,10 @@ async def search_similar_facts(
 ) -> Sequence[Tuple[models.Fact, float]]:
     result = await db.execute(
         select(models.Fact, models.Fact.embedding.cosine_distance(embedding).label("distance"))
-        .where(models.Fact.user_id == user_id)
-        .where(models.Fact.embedding.isnot(None))
+        .where(
+            ((models.Fact.user_id == user_id) | (models.Fact.is_shared == True))
+            & (models.Fact.embedding.isnot(None))
+        )
         .order_by("distance")
         .limit(limit)
     )

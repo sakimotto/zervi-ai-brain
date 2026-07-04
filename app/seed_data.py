@@ -5,7 +5,10 @@ bootstrap the AI brain for Zervi. It is imported by crud.py during startup
 seeding and can be extended as new departments or policies are added.
 """
 
+import logging
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Sequence
+
+logger = logging.getLogger(__name__)
 
 DEPARTMENT_PROMPTS: Dict[str, str] = {
     "Sales Agent": """You are the Zervi Sales Agent, an expert inside the Odoo sales workflow.
@@ -341,6 +344,9 @@ async def seed_department_knowledge(
         if (doc["source"], doc["title"]) in existing_doc_keys:
             continue
         embedding = await embed_fn(doc["content"])
+        if not embedding:
+            logger.warning("Skipping document '%s' seeding: no embedding available", doc["title"])
+            continue
         await create_document(
             db,
             source=doc["source"],
@@ -351,8 +357,9 @@ async def seed_department_knowledge(
             metadata=doc.get("metadata"),
         )
 
-    # Seed facts under a shared system user (user_id = 1) so every user can retrieve them.
-    existing_facts = await list_facts(db, user_id=1, limit=10000)
+    # Seed facts as shared knowledge (user_id = 0) so every user can retrieve them.
+    SYSTEM_USER_ID = 0
+    existing_facts = await list_facts(db, user_id=SYSTEM_USER_ID, limit=10000)
     existing_fact_keys = {
         (getattr(f, "category", None), getattr(f, "key", None)) for f in existing_facts
     }
@@ -360,11 +367,15 @@ async def seed_department_knowledge(
         if (fact["category"], fact["key"]) in existing_fact_keys:
             continue
         embedding = await embed_fn(fact["value"])
+        if not embedding:
+            logger.warning("Skipping fact '%s' seeding: no embedding available", fact["key"])
+            continue
         await create_fact(
             db,
-            user_id=1,
+            user_id=SYSTEM_USER_ID,
             category=fact["category"],
             key=fact["key"],
             value=fact["value"],
             embedding=embedding,
+            is_shared=True,
         )

@@ -18,3 +18,9 @@ DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
 AI_ASSISTANT_SECRET = os.getenv("AI_ASSISTANT_SECRET", "")
+
+# Comma-separated list of origins allowed to call the brain from the browser
+# (e.g. the Odoo frontend). If not set, all origins are allowed for backwards
+# compatibility, but production deployments should set this explicitly.
+_cors_origins = os.getenv("ALLOWED_ORIGINS", "")
+ALLOWED_ORIGINS = [origin.strip() for origin in _cors_origins.split(",") if origin.strip()] or ["*"]
