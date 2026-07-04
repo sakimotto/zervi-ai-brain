@@ -2,10 +2,14 @@
 
 import asyncio
 import json
+import asyncio
+import logging
 import os
 import re
+import subprocess
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import httpx
@@ -20,6 +24,9 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import crud, schemas
+
+logger = logging.getLogger(__name__)
+
 from .config import (
     AI_ASSISTANT_SECRET,
     ALLOWED_ORIGINS,
@@ -153,19 +160,27 @@ def _parse_suggestion(text: str) -> Dict[str, Any]:
     return {"suggestion": cleaned[:500], "tool_request": None}
 
 
-def _tool_allowed_for_agent(tool_name: str, agent) -> bool:
-    """Return True if the requested tool name exists in one of the agent's skills."""
-    if not agent or not hasattr(agent, "skills"):
-        return False
-    for skill in agent.skills:
-        schemas = skill.tool_schemas_json or []
+def _tool_allowed_by_schemas(tool_name: str, skill_schemas: List[List[Dict[str, Any]]]) -> bool:
+    """Return True if the requested tool name exists in the skill schemas."""
+    for schemas in skill_schemas:
         for schema in schemas:
             if schema.get("name") == tool_name:
                 return True
     return False
 
 
-def _validate_tool_request(tool_request: Dict[str, Any], agent) -> Optional[Dict[str, Any]]:
+def _tool_allowed_for_agent(tool_name: str, agent) -> bool:
+    """Return True if the requested tool name exists in one of the agent's skills."""
+    if not agent or not hasattr(agent, "skills"):
+        return False
+    skill_schemas = [skill.tool_schemas_json or [] for skill in agent.skills]
+    return _tool_allowed_by_schemas(tool_name, skill_schemas)
+
+
+def _validate_tool_request(
+    tool_request: Dict[str, Any],
+    agent_or_schemas: Any,
+) -> Optional[Dict[str, Any]]:
     """Validate and return a tool request only if it is allowed for the agent."""
     if not isinstance(tool_request, dict):
         return None
@@ -173,7 +188,13 @@ def _validate_tool_request(tool_request: Dict[str, Any], agent) -> Optional[Dict
     params = tool_request.get("params")
     if not tool_name or not isinstance(params, dict):
         return None
-    if not _tool_allowed_for_agent(tool_name, agent):
+    if hasattr(agent_or_schemas, "skills"):
+        allowed = _tool_allowed_for_agent(tool_name, agent_or_schemas)
+    elif isinstance(agent_or_schemas, list):
+        allowed = _tool_allowed_by_schemas(tool_name, agent_or_schemas)
+    else:
+        allowed = False
+    if not allowed:
         return None
     return {"tool": tool_name, "params": params}
 
@@ -282,6 +303,24 @@ def _quote_for_prompt(text: str, max_length: int = 500) -> str:
     return text[:max_length]
 
 
+async def _run_alembic_upgrade() -> None:
+    """Run pending DB migrations in a subprocess to avoid async loop issues."""
+    project_root = Path(__file__).resolve().parent.parent
+    proc = await asyncio.create_subprocess_exec(
+        "alembic",
+        "upgrade",
+        "head",
+        cwd=str(project_root),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"Alembic upgrade failed ({proc.returncode}): {stderr.decode() or stdout.decode()}"
+        )
+
+
 # ------------------------------------------------------------------
 # Lifespan
 # ------------------------------------------------------------------
@@ -289,12 +328,11 @@ def _quote_for_prompt(text: str, max_length: int = 500) -> str:
 async def lifespan(app: FastAPI):
     # Run any pending DB migrations on startup.
     try:
-        alembic_cfg = AlembicConfig("alembic.ini")
-        command.upgrade(alembic_cfg, "head")
-    except Exception:
+        await _run_alembic_upgrade()
+    except Exception as exc:
         # Migrations may fail if the DB is temporarily unreachable. Log and
         # continue; the health endpoint will report the real DB status.
-        pass
+        logger.warning("Database migrations could not run: %s", exc)
 
     # Seed the default agent + skills + department knowledge on startup.
     async with AsyncSessionLocal() as db:
@@ -466,54 +504,20 @@ async def chat(
         raise HTTPException(status_code=500, detail=f"Unexpected error: {exc}")
 
 
-# ------------------------------------------------------------------
-# Streaming chat endpoint
-# ------------------------------------------------------------------
-async def _stream_chat(
-    db: AsyncSession,
-    req: schemas.ChatRequest,
-) -> AsyncGenerator[str, None]:
-    """Internal generator that yields SSE events for a streaming chat reply."""
-    if not DEEPSEEK_API_KEY:
-        yield _sse_event("error", "DeepSeek API key is not configured")
-        return
-
-    agent = await crud.get_agent(db, req.agent_id)
-    if not agent:
-        agent = await crud.get_default_agent(db)
-    if not agent:
-        yield _sse_event("error", "No AI agent configured")
-        return
-
-    # Resolve or create session.
-    if req.session_id:
-        session = await crud.get_session(db, req.session_id)
-        if not session:
-            yield _sse_event("error", "Session not found")
-            return
-    else:
-        session = await crud.create_session(db, req.user_id, req.context)
-
-    # Persist the user's message.
-    user_message = await crud.add_message(
-        db, str(session.id), "user", req.message, token_count=None
-    )
-
-    # Fetch recent history and relevant semantic memory.
-    recent_db_messages = await crud.get_recent_messages(db, str(session.id), limit=50)
-    recent_db_messages = list(reversed(recent_db_messages))
-
-    knowledge = await _retrieve_knowledge(
-        db, req.user_id, req.message, message_id_to_skip=user_message.id
-    )
-    relevant_snippets = knowledge["snippets"]
-    source_citations = knowledge["sources"]
-
-    messages: List[Dict[str, str]] = [{"role": "system", "content": agent.system_prompt}]
+def _build_llm_messages(
+    system_prompt: str,
+    skill_schemas: List[List[Dict[str, Any]]],
+    context: Dict[str, Any],
+    recent_messages: List[Dict[str, str]],
+    relevant_snippets: List[str],
+    user_message: str,
+) -> List[Dict[str, str]]:
+    """Assemble the message list sent to the LLM."""
+    messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
 
     tool_schema_blocks: List[str] = []
-    for skill in agent.skills:
-        for schema in skill.tool_schemas_json:
+    for schemas in skill_schemas:
+        for schema in schemas:
             tool_schema_blocks.append(json.dumps(schema))
     if tool_schema_blocks:
         messages.append(
@@ -523,8 +527,8 @@ async def _stream_chat(
             }
         )
 
-    if req.context:
-        messages.append(_build_context_message(req.context))
+    if context:
+        messages.append(_build_context_message(context))
 
     if relevant_snippets:
         citation_instruction = (
@@ -538,12 +542,81 @@ async def _stream_chat(
             }
         )
 
-    for msg in recent_db_messages:
-        messages.append({"role": msg.role, "content": msg.content})
+    messages.extend(recent_messages)
+    messages.append({"role": "user", "content": user_message})
+    return messages
 
-    messages.append({"role": "user", "content": req.message})
 
-    # Stream from DeepSeek.
+# ------------------------------------------------------------------
+# Streaming chat endpoint
+# ------------------------------------------------------------------
+async def _stream_chat(
+    req: schemas.ChatRequest,
+) -> AsyncGenerator[str, None]:
+    """Internal generator that yields SSE events for a streaming chat reply.
+
+    DB sessions are opened only for persistence work; the HTTP stream itself
+    does not hold a database connection.
+    """
+    if not DEEPSEEK_API_KEY:
+        yield _sse_event("error", "DeepSeek API key is not configured")
+        return
+
+    # ------------------------------------------------------------------
+    # Phase 1: prepare context and persist the user's message.
+    # ------------------------------------------------------------------
+    async with AsyncSessionLocal() as db:
+        agent = await crud.get_agent(db, req.agent_id)
+        if not agent:
+            agent = await crud.get_default_agent(db)
+        if not agent:
+            yield _sse_event("error", "No AI agent configured")
+            return
+
+        # Resolve or create session.
+        if req.session_id:
+            session = await crud.get_session(db, req.session_id)
+            if not session:
+                yield _sse_event("error", "Session not found")
+                return
+        else:
+            session = await crud.create_session(db, req.user_id, req.context)
+
+        session_id = str(session.id)
+
+        # Persist the user's message.
+        user_message = await crud.add_message(
+            db, session_id, "user", req.message, token_count=None
+        )
+        user_message_id = str(user_message.id)
+
+        # Fetch recent history and relevant semantic memory.
+        recent_db_messages = await crud.get_recent_messages(db, session_id, limit=50)
+        recent_db_messages = list(reversed(recent_db_messages))
+
+        knowledge = await _retrieve_knowledge(
+            db, req.user_id, req.message, message_id_to_skip=user_message.id
+        )
+        relevant_snippets = knowledge["snippets"]
+        source_citations = knowledge["sources"]
+
+        # Capture serializable state for the streaming phase.
+        system_prompt = agent.system_prompt
+        skill_schemas = [skill.tool_schemas_json or [] for skill in agent.skills]
+        recent_messages = [{"role": msg.role, "content": msg.content} for msg in recent_db_messages]
+
+    messages = _build_llm_messages(
+        system_prompt,
+        skill_schemas,
+        req.context,
+        recent_messages,
+        relevant_snippets,
+        req.message,
+    )
+
+    # ------------------------------------------------------------------
+    # Phase 2: stream tokens from DeepSeek without holding a DB session.
+    # ------------------------------------------------------------------
     full_reply = ""
     try:
         async with httpx.AsyncClient() as client:
@@ -585,28 +658,39 @@ async def _stream_chat(
         yield _sse_event("error", f"Unexpected error: {exc}")
         return
 
+    # ------------------------------------------------------------------
+    # Phase 3: persist the assistant reply and embeddings.
+    # ------------------------------------------------------------------
     parsed = _parse_reply(full_reply)
-    validated_tool_request = _validate_tool_request(parsed.get("tool_request"), agent)
+    validated_tool_request = _validate_tool_request(parsed.get("tool_request"), skill_schemas)
     assistant_content = parsed.get("reply") or json.dumps(validated_tool_request)
-    assistant_message = await crud.add_message(
-        db, str(session.id), "assistant", assistant_content, token_count=None
-    )
 
-    for text, msg_record in ((req.message, user_message), (assistant_content, assistant_message)):
-        embedding = await _embed_text(text)
-        if embedding:
-            await crud.save_embedding(db, str(msg_record.id), embedding)
+    async with AsyncSessionLocal() as db:
+        assistant_message = await crud.add_message(
+            db, session_id, "assistant", assistant_content, token_count=None
+        )
+
+        for text, msg_id in (
+            (req.message, user_message_id),
+            (assistant_content, str(assistant_message.id)),
+        ):
+            embedding = await _embed_text(text)
+            if embedding:
+                await crud.save_embedding(db, msg_id, embedding)
 
     if validated_tool_request:
         yield _sse_event("tool_request", json.dumps(validated_tool_request))
     else:
         yield _sse_event("reply", parsed.get("reply") or "")
 
-    yield _sse_event("done", json.dumps({"session_id": str(session.id), "sources": source_citations}))
+    yield _sse_event("done", json.dumps({"session_id": session_id, "sources": source_citations}))
 
 
 def _sse_event(event: str, data: str) -> str:
-    return f"event: {event}\ndata: {data}\n\n"
+    """Build a valid SSE event, splitting multi-line data across data: lines."""
+    lines = str(data).split("\n")
+    payload = "\n".join(f"data: {line}" for line in lines)
+    return f"event: {event}\n{payload}\n\n"
 
 
 @app.post("/chat/stream")
@@ -616,13 +700,8 @@ async def chat_stream(
 ) -> StreamingResponse:
     _check_secret(x_ai_assistant_secret)
 
-    async def event_generator() -> AsyncGenerator[str, None]:
-        async with AsyncSessionLocal() as db:
-            async for event in _stream_chat(db, req):
-                yield event
-
     return StreamingResponse(
-        event_generator(),
+        _stream_chat(req),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
