@@ -292,18 +292,6 @@ async def get_session(db: AsyncSession, session_id: str) -> Optional[models.Chat
     return result.scalar_one_or_none()
 
 
-async def update_session_metadata(
-    db: AsyncSession, session_id: str, metadata: Dict[str, Any]
-) -> Optional[models.ChatSession]:
-    session = await get_session(db, session_id)
-    if not session:
-        return None
-    session.metadata_json = {**(session.metadata_json or {}), **metadata}
-    await db.commit()
-    await db.refresh(session)
-    return session
-
-
 async def get_sessions_for_user(db: AsyncSession, user_id: int) -> Sequence[models.ChatSession]:
     result = await db.execute(
         select(models.ChatSession)
