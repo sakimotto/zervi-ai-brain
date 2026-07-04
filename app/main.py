@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import asyncio
 import logging
 import os
 import re
@@ -27,6 +26,7 @@ from . import crud, schemas
 
 logger = logging.getLogger(__name__)
 
+from . import config
 from .config import (
     AI_ASSISTANT_SECRET,
     ALLOWED_ORIGINS,
@@ -127,36 +127,45 @@ if OPENAI_API_KEY:
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
-def _parse_reply(text: str) -> Dict[str, Any]:
-    text = text.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        text = text.strip()
-    try:
-        data = json.loads(text)
-        if isinstance(data, dict) and "tool" in data and "params" in data:
-            return {"tool_request": data}
-    except json.JSONDecodeError:
-        pass
-    return {"reply": text}
-
-
-def _parse_suggestion(text: str) -> Dict[str, Any]:
+def _extract_json(text: str) -> Optional[Any]:
+    """Try to extract a JSON object/array from a string, even inside markdown."""
     cleaned = text.strip()
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
         cleaned = re.sub(r"\s*```$", "", cleaned)
         cleaned = cleaned.strip()
+
     try:
-        data = json.loads(cleaned)
-        if isinstance(data, dict) and "suggestion" in data:
-            tool_request = data.get("tool_request")
-            if tool_request and not isinstance(tool_request, dict):
-                tool_request = None
-            return {"suggestion": data["suggestion"], "tool_request": tool_request}
+        return json.loads(cleaned)
     except json.JSONDecodeError:
         pass
+
+    # Fallback: find the first {...} block that parses as JSON.
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
+def _parse_reply(text: str) -> Dict[str, Any]:
+    data = _extract_json(text)
+    if isinstance(data, dict) and "tool" in data and "params" in data:
+        return {"tool_request": data}
+    return {"reply": text.strip()}
+
+
+def _parse_suggestion(text: str) -> Dict[str, Any]:
+    data = _extract_json(text)
+    if isinstance(data, dict) and "suggestion" in data:
+        tool_request = data.get("tool_request")
+        if tool_request and not isinstance(tool_request, dict):
+            tool_request = None
+        return {"suggestion": data["suggestion"], "tool_request": tool_request}
+    cleaned = text.strip()
     return {"suggestion": cleaned[:500], "tool_request": None}
 
 
@@ -242,14 +251,14 @@ async def _retrieve_knowledge(
     for msg, distance in similar_messages:
         if message_id_to_skip and msg.id == message_id_to_skip:
             continue
-        if distance is not None and distance < 0.4:
+        if distance is not None and distance < config.SIMILARITY_THRESHOLD:
             snippets.append(f"Past conversation - {msg.role}: {msg.content}")
 
     # Documents
     similar_docs = await crud.search_similar_documents(db, embedding, limit=10)
     seen_doc_groups = set()
     for doc, distance in similar_docs:
-        if distance is not None and distance < 0.4:
+        if distance is not None and distance < config.SIMILARITY_THRESHOLD:
             snippets.append(f"Document [{doc.source}] {doc.title}:\n{doc.content}")
             group_id = (doc.metadata_json or {}).get("group_id")
             dedupe_key = group_id or str(doc.id)
@@ -267,7 +276,7 @@ async def _retrieve_knowledge(
     # Facts
     similar_facts = await crud.search_similar_facts(db, user_id, embedding, limit=5)
     for fact, distance in similar_facts:
-        if distance is not None and distance < 0.4:
+        if distance is not None and distance < config.SIMILARITY_THRESHOLD:
             snippets.append(f"Known fact ({fact.category}) - {fact.key}: {fact.value}")
             sources.append(
                 {
