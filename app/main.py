@@ -110,8 +110,9 @@ _SUGGEST_PROMPT = (
     "\n\n"
     "Proactive suggestion mode — you are looking at the user's current screen. "
     "Recommend the single most useful next action they could take. "
-    "Only recommend an action if it is clearly appropriate based on the visible records and state. "
-    "If specific records are visible, mention their names or reference numbers. "
+    "If specific records are visible and you can suggest a concrete next step, mention their names or reference numbers. "
+    "If no record is visible or no concrete action is appropriate, suggest a general way the user can interact with Zervi AI "
+    "(for example: ask about sales orders, check inventory, or review manufacturing orders). "
     "Be concise but specific (one short sentence).\n\n"
     "You must respond with ONLY a JSON object in this exact format:\n"
     '{"suggestion": "short recommendation text", "tool_request": null}\n\n'
