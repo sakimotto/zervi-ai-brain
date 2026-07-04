@@ -111,8 +111,7 @@ _SUGGEST_PROMPT = (
     "Proactive suggestion mode — you are looking at the user's current screen. "
     "Recommend the single most useful next action they could take. "
     "If specific records are visible and you can suggest a concrete next step, mention their names or reference numbers. "
-    "If no record is visible or no concrete action is appropriate, suggest a general way the user can interact with Zervi AI "
-    "(for example: ask about sales orders, check inventory, or review manufacturing orders). "
+    "If no record details are visible, still base your recommendation on the model type if one is provided. "
     "Be concise but specific (one short sentence).\n\n"
     "You must respond with ONLY a JSON object in this exact format:\n"
     '{"suggestion": "short recommendation text", "tool_request": null}\n\n'
@@ -120,6 +119,32 @@ _SUGGEST_PROMPT = (
     '{"suggestion": "Confirm this quotation to reserve stock", "tool_request": {"tool": "confirm_sales_order", "params": {"res_model": "sale.order", "res_id": 123, "confirmation_message": "Confirm Sales Order S0012?"}}}\n\n'
     "Do not include any prose outside the JSON object."
 )
+
+# Fallback suggestions when the LLM returns empty text. Prefer model-aware
+# text so the assistant still feels context-sensitive.
+_SUGGESTION_FALLBACKS = {
+    "sale.order": "Review this sales order and confirm or invoice it when ready.",
+    "purchase.order": "Check this purchase order status or confirm it with the vendor.",
+    "account.move": "Review this invoice, register a payment, or send a reminder.",
+    "stock.picking": "Validate this transfer or check availability and related orders.",
+    "mrp.production": "Check component availability or mark this manufacturing order done.",
+    "project.task": "Update this task status, log time, or create a follow-up activity.",
+    "crm.lead": "Move this lead forward, schedule an activity, or draft a proposal.",
+    "hr.employee": "Review this employee's contract, leave balance, or timesheet.",
+    "product.product": "Check stock levels, sales history, or supplier costs for this product.",
+    "res.partner": "Review this partner's open orders, invoices, or contact details.",
+}
+
+
+def _suggestion_fallback(context: Optional[Dict[str, Any]]) -> str:
+    """Return a context-aware fallback when the model gives no suggestion."""
+    model = (context or {}).get("active_model", "")
+    if model:
+        return _SUGGESTION_FALLBACKS.get(
+            model,
+            f"Ask me anything about this {model.split('.')[-1].replace('_', ' ')} record.",
+        )
+    return "Ask me anything about your orders, inventory, manufacturing, or accounting."
 
 
 openai_client: Optional[AsyncOpenAI] = None
@@ -809,7 +834,7 @@ async def suggest(
         parsed = _parse_suggestion(raw_reply)
         suggestion_text = (parsed.get("suggestion") or "").strip()
         if not suggestion_text:
-            suggestion_text = "Ask me anything about your orders, inventory, manufacturing, or accounting."
+            suggestion_text = _suggestion_fallback(req.context)
         skill_schemas = [skill.tool_schemas_json or [] for skill in agent.skills]
         validated_tool_request = _validate_tool_request(parsed.get("tool_request"), skill_schemas)
         return schemas.SuggestResponse(
