@@ -56,7 +56,16 @@ async def create_agent(
     await db.flush()
 
     if skill_ids:
-        for skill_id in skill_ids:
+        # Validate that every supplied skill exists before linking.
+        skill_ids = list(set(skill_ids))
+        result = await db.execute(
+            select(models.AISkill.id).where(models.AISkill.id.in_(skill_ids))
+        )
+        valid_ids = {row[0] for row in result.all()}
+        invalid_ids = set(skill_ids) - valid_ids
+        if invalid_ids:
+            raise ValueError(f"Invalid skill IDs: {sorted(invalid_ids)}")
+        for skill_id in valid_ids:
             await db.execute(
                 insert(models.AgentSkillLink).values(agent_id=agent.id, skill_id=skill_id)
             )

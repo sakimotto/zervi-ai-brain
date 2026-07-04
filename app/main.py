@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from . import crud, schemas
 from .config import (
     AI_ASSISTANT_SECRET,
+    ALLOWED_ORIGINS,
     DEEPSEEK_API_KEY,
     DEEPSEEK_BASE_URL,
     DEEPSEEK_MODEL,
@@ -152,6 +153,31 @@ def _parse_suggestion(text: str) -> Dict[str, Any]:
     return {"suggestion": cleaned[:500], "tool_request": None}
 
 
+def _tool_allowed_for_agent(tool_name: str, agent) -> bool:
+    """Return True if the requested tool name exists in one of the agent's skills."""
+    if not agent or not hasattr(agent, "skills"):
+        return False
+    for skill in agent.skills:
+        schemas = skill.tool_schemas_json or []
+        for schema in schemas:
+            if schema.get("name") == tool_name:
+                return True
+    return False
+
+
+def _validate_tool_request(tool_request: Dict[str, Any], agent) -> Optional[Dict[str, Any]]:
+    """Validate and return a tool request only if it is allowed for the agent."""
+    if not isinstance(tool_request, dict):
+        return None
+    tool_name = tool_request.get("tool")
+    params = tool_request.get("params")
+    if not tool_name or not isinstance(params, dict):
+        return None
+    if not _tool_allowed_for_agent(tool_name, agent):
+        return None
+    return {"tool": tool_name, "params": params}
+
+
 async def _embed_text(text: str) -> Optional[List[float]]:
     if not openai_client:
         return None
@@ -236,8 +262,24 @@ async def _retrieve_knowledge(
 
 def _build_context_message(context: Dict[str, Any]) -> Dict[str, str]:
     ctx = context or {}
-    lines = [f"{k}: {v}" for k, v in ctx.items()]
-    return {"role": "system", "content": "Current Odoo context:\n" + "\n".join(lines)}
+    # Serialize context as pretty JSON inside a fenced block so model output
+    # in context values cannot break out of the system instructions.
+    try:
+        context_json = json.dumps(ctx, ensure_ascii=False, default=str, indent=2)
+    except (TypeError, ValueError):
+        context_json = str(ctx)
+    return {
+        "role": "system",
+        "content": "Current Odoo context (JSON):\n```json\n" + context_json + "\n```",
+    }
+
+
+def _quote_for_prompt(text: str, max_length: int = 500) -> str:
+    """Quote a user-supplied string so it cannot escape system instructions."""
+    text = text or ""
+    # Strip delimiter sequences that could close the quoting block.
+    text = text.replace('"""', '').replace("```", "")
+    return text[:max_length]
 
 
 # ------------------------------------------------------------------
@@ -268,11 +310,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Zervi AI Brain", version="0.3.1", lifespan=lifespan)
 
-# Allow the Odoo frontend(s) to call the brain from the browser.
+# Allow the configured Odoo frontend(s) to call the brain from the browser.
 # In production, AI_ASSISTANT_SECRET is still required for every endpoint.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -283,7 +325,9 @@ app.add_middleware(
 # Endpoints
 # ------------------------------------------------------------------
 def _check_secret(x_secret: Optional[str]) -> None:
-    if AI_ASSISTANT_SECRET and x_secret != AI_ASSISTANT_SECRET:
+    if not AI_ASSISTANT_SECRET:
+        raise HTTPException(status_code=500, detail="AI assistant secret is not configured")
+    if x_secret != AI_ASSISTANT_SECRET:
         raise HTTPException(status_code=403, detail="Invalid secret")
 
 
@@ -389,9 +433,10 @@ async def chat(
         data = response.json()
         raw_reply = data["choices"][0]["message"]["content"]
         parsed = _parse_reply(raw_reply)
+        validated_tool_request = _validate_tool_request(parsed.get("tool_request"), agent)
 
         # Persist the assistant reply.
-        assistant_content = parsed.get("reply") or json.dumps(parsed.get("tool_request"))
+        assistant_content = parsed.get("reply") or json.dumps(validated_tool_request)
         assistant_message = await crud.add_message(
             db, str(session.id), "assistant", assistant_content, token_count=None
         )
@@ -404,7 +449,7 @@ async def chat(
 
         return schemas.ChatResponse(
             reply=parsed.get("reply"),
-            tool_request=parsed.get("tool_request"),
+            tool_request=validated_tool_request,
             session_id=str(session.id),
             sources=source_citations,
         )
@@ -541,7 +586,8 @@ async def _stream_chat(
         return
 
     parsed = _parse_reply(full_reply)
-    assistant_content = parsed.get("reply") or json.dumps(parsed.get("tool_request"))
+    validated_tool_request = _validate_tool_request(parsed.get("tool_request"), agent)
+    assistant_content = parsed.get("reply") or json.dumps(validated_tool_request)
     assistant_message = await crud.add_message(
         db, str(session.id), "assistant", assistant_content, token_count=None
     )
@@ -551,8 +597,8 @@ async def _stream_chat(
         if embedding:
             await crud.save_embedding(db, str(msg_record.id), embedding)
 
-    if parsed.get("tool_request"):
-        yield _sse_event("tool_request", json.dumps(parsed["tool_request"]))
+    if validated_tool_request:
+        yield _sse_event("tool_request", json.dumps(validated_tool_request))
     else:
         yield _sse_event("reply", parsed.get("reply") or "")
 
@@ -611,8 +657,9 @@ async def suggest(
                 "Recommend a different useful next action than before."
             )
         if req.last_suggestion:
+            safe_last = _quote_for_prompt(req.last_suggestion)
             system_content += (
-                f"\n\nPrevious suggestion (do not repeat it): {req.last_suggestion}"
+                f'\n\nPrevious suggestion (do not repeat it):\n"""{safe_last}"""'
             )
 
         messages: List[Dict[str, str]] = [
@@ -640,7 +687,11 @@ async def suggest(
         data = response.json()
         raw_reply = data["choices"][0]["message"]["content"]
         parsed = _parse_suggestion(raw_reply)
-        return schemas.SuggestResponse(**parsed)
+        validated_tool_request = _validate_tool_request(parsed.get("tool_request"), agent)
+        return schemas.SuggestResponse(
+            suggestion=parsed.get("suggestion", ""),
+            tool_request=validated_tool_request,
+        )
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
