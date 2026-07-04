@@ -224,6 +224,9 @@ async def ensure_default_agent_and_skills(db: AsyncSession, default_prompt: str)
         )
         db.add(agent)
         await db.flush()
+    elif agent.system_prompt != default_prompt:
+        agent.system_prompt = default_prompt
+        await db.flush()
 
     # Ensure the default agent is linked to all default skills.
     # Avoid lazy-loading agent.skills by querying the link table directly.
