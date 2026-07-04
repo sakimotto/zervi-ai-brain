@@ -38,6 +38,9 @@ class TestParseSkillRequest:
 
 
 class TestParseReply:
+    def test_plain_reply(self):
+        assert _parse_reply("Hello!") == {"reply": "Hello!"}
+
     def test_skill_request_priority(self):
         text = '{"skill": "locate_stock", "params": {"product_id": 123}}'
         result = _parse_reply(text)
@@ -46,32 +49,61 @@ class TestParseReply:
         assert "tool_request" not in result
         assert "reply" not in result
 
-    def test_tool_request(self):
-        text = '{"tool": "confirm_sales_order", "params": {"res_id": 1, "confirmation_message": "Confirm?"}}'
-        result = _parse_reply(text)
-        assert result["tool_request"]["tool"] == "confirm_sales_order"
+    def test_tool_request_json(self):
+        text = '{"tool": "confirm_sales_order", "params": {"id": 42}}'
+        assert _parse_reply(text) == {
+            "tool_request": {"tool": "confirm_sales_order", "params": {"id": 42}}
+        }
 
-    def test_conversational_reply(self):
-        text = "The sales order is still in draft."
-        result = _parse_reply(text)
-        assert result["reply"] == text
+    def test_tool_request_in_markdown_fence(self):
+        text = '```json\n{"tool": "confirm_sales_order", "params": {"id": 42}}\n```'
+        assert _parse_reply(text) == {
+            "tool_request": {"tool": "confirm_sales_order", "params": {"id": 42}}
+        }
+
+    def test_tool_request_with_explanation_text(self):
+        text = (
+            "I will confirm this order for you.\n"
+            '```json\n{"tool": "confirm_sales_order", "params": {"id": 7}}\n```'
+        )
+        assert _parse_reply(text) == {
+            "tool_request": {"tool": "confirm_sales_order", "params": {"id": 7}}
+        }
+
+    def test_invalid_json_treated_as_reply(self):
+        text = "Here is the info: {not valid json"
+        assert _parse_reply(text) == {"reply": text}
 
 
 class TestParseSuggestion:
-    def test_valid_suggestion(self):
-        text = '{"suggestion": "Confirm this order", "tool_request": null}'
-        result = _parse_suggestion(text)
-        assert result["suggestion"] == "Confirm this order"
-        assert result["tool_request"] is None
+    def test_plain_suggestion(self):
+        assert _parse_suggestion("Confirm the order") == {
+            "suggestion": "Confirm the order",
+            "tool_request": None,
+        }
 
-    def test_suggestion_with_tool(self):
-        text = '{"suggestion": "Validate picking", "tool_request": {"tool": "validate_picking", "params": {"res_id": 7}}}'
-        result = _parse_suggestion(text)
-        assert result["suggestion"] == "Validate picking"
-        assert result["tool_request"]["tool"] == "validate_picking"
+    def test_json_suggestion(self):
+        text = '{"suggestion": "Confirm the order", "tool_request": {"tool": "confirm", "params": {}}}'
+        assert _parse_suggestion(text) == {
+            "suggestion": "Confirm the order",
+            "tool_request": {"tool": "confirm", "params": {}},
+        }
 
-    def test_plain_text(self):
-        text = "Confirm this order"
-        result = _parse_suggestion(text)
-        assert result["suggestion"] == text
-        assert result["tool_request"] is None
+    def test_suggestion_in_markdown_fence(self):
+        text = '```json\n{"suggestion": "Check stock"}\n```'
+        assert _parse_suggestion(text) == {
+            "suggestion": "Check stock",
+            "tool_request": None,
+        }
+
+    def test_non_dict_tool_request_is_ignored(self):
+        text = '{"suggestion": "X", "tool_request": "bad"}'
+        assert _parse_suggestion(text) == {
+            "suggestion": "X",
+            "tool_request": None,
+        }
+
+    def test_long_plain_suggestion_truncated(self):
+        long_text = "x" * 1000
+        result = _parse_suggestion(long_text)
+        assert result["suggestion"] == "x" * 500

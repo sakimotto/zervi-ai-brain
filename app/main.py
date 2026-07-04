@@ -2,16 +2,20 @@
 
 import asyncio
 import json
+import logging
 import os
 import re
+import subprocess
+import time
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import httpx
 from alembic import command
 from alembic.config import Config as AlembicConfig
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from openai import AsyncOpenAI
@@ -20,8 +24,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import crud, schemas
+
+logger = logging.getLogger(__name__)
+
+from . import config
 from .config import (
     AI_ASSISTANT_SECRET,
+    ALLOWED_ORIGINS,
     DEEPSEEK_API_KEY,
     DEEPSEEK_BASE_URL,
     DEEPSEEK_MODEL,
@@ -29,6 +38,7 @@ from .config import (
     OPENAI_BASE_URL,
 )
 from .db import AsyncSessionLocal, engine, get_db
+from .rate_limit import check_chat_rate_limit, check_suggest_rate_limit
 
 
 # ------------------------------------------------------------------
@@ -107,8 +117,8 @@ _SUGGEST_PROMPT = (
     "\n\n"
     "Proactive suggestion mode — you are looking at the user's current screen. "
     "Recommend the single most useful next action they could take. "
-    "Only recommend an action if it is clearly appropriate based on the visible records and state. "
-    "If specific records are visible, mention their names or reference numbers. "
+    "If specific records are visible and you can suggest a concrete next step, mention their names or reference numbers. "
+    "If no record details are visible, still base your recommendation on the model type if one is provided. "
     "Be concise but specific (one short sentence).\n\n"
     "You must respond with ONLY a JSON object in this exact format:\n"
     '{"suggestion": "short recommendation text", "tool_request": null}\n\n'
@@ -116,6 +126,32 @@ _SUGGEST_PROMPT = (
     '{"suggestion": "Confirm this quotation to reserve stock", "tool_request": {"tool": "confirm_sales_order", "params": {"res_model": "sale.order", "res_id": 123, "confirmation_message": "Confirm Sales Order S0012?"}}}\n\n'
     "Do not include any prose outside the JSON object."
 )
+
+# Fallback suggestions when the LLM returns empty text. Prefer model-aware
+# text so the assistant still feels context-sensitive.
+_SUGGESTION_FALLBACKS = {
+    "sale.order": "Review this sales order and confirm or invoice it when ready.",
+    "purchase.order": "Check this purchase order status or confirm it with the vendor.",
+    "account.move": "Review this invoice, register a payment, or send a reminder.",
+    "stock.picking": "Validate this transfer or check availability and related orders.",
+    "mrp.production": "Check component availability or mark this manufacturing order done.",
+    "project.task": "Update this task status, log time, or create a follow-up activity.",
+    "crm.lead": "Move this lead forward, schedule an activity, or draft a proposal.",
+    "hr.employee": "Review this employee's contract, leave balance, or timesheet.",
+    "product.product": "Check stock levels, sales history, or supplier costs for this product.",
+    "res.partner": "Review this partner's open orders, invoices, or contact details.",
+}
+
+
+def _suggestion_fallback(context: Optional[Dict[str, Any]]) -> str:
+    """Return a context-aware fallback when the model gives no suggestion."""
+    model = (context or {}).get("active_model", "")
+    if model:
+        return _SUGGESTION_FALLBACKS.get(
+            model,
+            f"Ask me anything about this {model.split('.')[-1].replace('_', ' ')} record.",
+        )
+    return "Ask me anything about your orders, inventory, manufacturing, or accounting."
 
 
 openai_client: Optional[AsyncOpenAI] = None
@@ -126,25 +162,32 @@ if OPENAI_API_KEY:
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
-def _clean_json_block(text: str) -> str:
-    text = text.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```(?:json)?\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        text = text.strip()
-    # If there is explanatory text around a JSON object, extract the first object.
-    match = re.search(r"\{.*\}", text, re.DOTALL)
+def _extract_json(text: str) -> Optional[Any]:
+    """Try to extract a JSON object/array from a string, even inside markdown."""
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+        cleaned = cleaned.strip()
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # Fallback: find the first {...} block that parses as JSON.
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
     if match:
-        return match.group(0)
-    return text
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            pass
+
+    return None
 
 
 def _parse_skill_request(text: str) -> Optional[Dict[str, Any]]:
-    cleaned = _clean_json_block(text)
-    try:
-        data = json.loads(cleaned)
-    except json.JSONDecodeError:
-        return None
+    data = _extract_json(text)
     if not isinstance(data, dict):
         return None
     if "skill" in data and "params" in data and "tool" not in data:
@@ -156,35 +199,65 @@ def _parse_skill_request(text: str) -> Optional[Dict[str, Any]]:
 
 
 def _parse_reply(text: str) -> Dict[str, Any]:
-    cleaned = _clean_json_block(text)
-    try:
-        data = json.loads(cleaned)
-        if isinstance(data, dict):
-            if "skill" in data and "params" in data:
-                return {"skill_request": _parse_skill_request(text)}
-            if "tool" in data and "params" in data:
-                return {"tool_request": data}
-    except json.JSONDecodeError:
-        pass
-    return {"reply": text}
+    data = _extract_json(text)
+    if isinstance(data, dict):
+        if "skill" in data and "params" in data:
+            skill_request = _parse_skill_request(text)
+            if skill_request:
+                return {"skill_request": skill_request}
+        if "tool" in data and "params" in data:
+            return {"tool_request": data}
+    return {"reply": text.strip()}
 
 
 def _parse_suggestion(text: str) -> Dict[str, Any]:
+    data = _extract_json(text)
+    if isinstance(data, dict) and "suggestion" in data:
+        tool_request = data.get("tool_request")
+        if tool_request and not isinstance(tool_request, dict):
+            tool_request = None
+        return {"suggestion": data["suggestion"], "tool_request": tool_request}
     cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-        cleaned = re.sub(r"\s*```$", "", cleaned)
-        cleaned = cleaned.strip()
-    try:
-        data = json.loads(cleaned)
-        if isinstance(data, dict) and "suggestion" in data:
-            tool_request = data.get("tool_request")
-            if tool_request and not isinstance(tool_request, dict):
-                tool_request = None
-            return {"suggestion": data["suggestion"], "tool_request": tool_request}
-    except json.JSONDecodeError:
-        pass
     return {"suggestion": cleaned[:500], "tool_request": None}
+
+
+def _tool_allowed_by_schemas(tool_name: str, skill_schemas: List[List[Dict[str, Any]]]) -> bool:
+    """Return True if the requested tool name exists in the skill schemas."""
+    for schemas in skill_schemas:
+        for schema in schemas:
+            if schema.get("name") == tool_name:
+                return True
+    return False
+
+
+def _tool_allowed_for_agent(tool_name: str, agent) -> bool:
+    """Return True if the requested tool name exists in one of the agent's skills."""
+    if not agent or not hasattr(agent, "skills"):
+        return False
+    skill_schemas = [skill.tool_schemas_json or [] for skill in agent.skills]
+    return _tool_allowed_by_schemas(tool_name, skill_schemas)
+
+
+def _validate_tool_request(
+    tool_request: Dict[str, Any],
+    agent_or_schemas: Any,
+) -> Optional[Dict[str, Any]]:
+    """Validate and return a tool request only if it is allowed for the agent."""
+    if not isinstance(tool_request, dict):
+        return None
+    tool_name = tool_request.get("tool")
+    params = tool_request.get("params")
+    if not tool_name or not isinstance(params, dict):
+        return None
+    if hasattr(agent_or_schemas, "skills"):
+        allowed = _tool_allowed_for_agent(tool_name, agent_or_schemas)
+    elif isinstance(agent_or_schemas, list):
+        allowed = _tool_allowed_by_schemas(tool_name, agent_or_schemas)
+    else:
+        allowed = False
+    if not allowed:
+        return None
+    return {"tool": tool_name, "params": params}
 
 
 async def _embed_text(text: str) -> Optional[List[float]]:
@@ -230,14 +303,14 @@ async def _retrieve_knowledge(
     for msg, distance in similar_messages:
         if message_id_to_skip and msg.id == message_id_to_skip:
             continue
-        if distance is not None and distance < 0.4:
+        if distance is not None and distance < config.SIMILARITY_THRESHOLD:
             snippets.append(f"Past conversation - {msg.role}: {msg.content}")
 
     # Documents
     similar_docs = await crud.search_similar_documents(db, embedding, limit=10)
     seen_doc_groups = set()
     for doc, distance in similar_docs:
-        if distance is not None and distance < 0.4:
+        if distance is not None and distance < config.SIMILARITY_THRESHOLD:
             snippets.append(f"Document [{doc.source}] {doc.title}:\n{doc.content}")
             group_id = (doc.metadata_json or {}).get("group_id")
             dedupe_key = group_id or str(doc.id)
@@ -255,7 +328,7 @@ async def _retrieve_knowledge(
     # Facts
     similar_facts = await crud.search_similar_facts(db, user_id, embedding, limit=5)
     for fact, distance in similar_facts:
-        if distance is not None and distance < 0.4:
+        if distance is not None and distance < config.SIMILARITY_THRESHOLD:
             snippets.append(f"Known fact ({fact.category}) - {fact.key}: {fact.value}")
             sources.append(
                 {
@@ -271,8 +344,42 @@ async def _retrieve_knowledge(
 
 def _build_context_message(context: Dict[str, Any]) -> Dict[str, str]:
     ctx = context or {}
-    lines = [f"{k}: {v}" for k, v in ctx.items()]
-    return {"role": "system", "content": "Current Odoo context:\n" + "\n".join(lines)}
+    # Serialize context as pretty JSON inside a fenced block so model output
+    # in context values cannot break out of the system instructions.
+    try:
+        context_json = json.dumps(ctx, ensure_ascii=False, default=str, indent=2)
+    except (TypeError, ValueError):
+        context_json = str(ctx)
+    return {
+        "role": "system",
+        "content": "Current Odoo context (JSON):\n```json\n" + context_json + "\n```",
+    }
+
+
+def _quote_for_prompt(text: str, max_length: int = 500) -> str:
+    """Quote a user-supplied string so it cannot escape system instructions."""
+    text = text or ""
+    # Strip delimiter sequences that could close the quoting block.
+    text = text.replace('"""', '').replace("```", "")
+    return text[:max_length]
+
+
+async def _run_alembic_upgrade() -> None:
+    """Run pending DB migrations in a subprocess to avoid async loop issues."""
+    project_root = Path(__file__).resolve().parent.parent
+    proc = await asyncio.create_subprocess_exec(
+        "alembic",
+        "upgrade",
+        "head",
+        cwd=str(project_root),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"Alembic upgrade failed ({proc.returncode}): {stderr.decode() or stdout.decode()}"
+        )
 
 
 # ------------------------------------------------------------------
@@ -282,12 +389,11 @@ def _build_context_message(context: Dict[str, Any]) -> Dict[str, str]:
 async def lifespan(app: FastAPI):
     # Run any pending DB migrations on startup.
     try:
-        alembic_cfg = AlembicConfig("alembic.ini")
-        command.upgrade(alembic_cfg, "head")
-    except Exception:
+        await _run_alembic_upgrade()
+    except Exception as exc:
         # Migrations may fail if the DB is temporarily unreachable. Log and
         # continue; the health endpoint will report the real DB status.
-        pass
+        logger.warning("Database migrations could not run: %s", exc)
 
     # Seed the default agent + skills + department knowledge on startup.
     async with AsyncSessionLocal() as db:
@@ -303,22 +409,47 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Zervi AI Brain", version="0.3.1", lifespan=lifespan)
 
-# Allow the Odoo frontend(s) to call the brain from the browser.
+# Allow the configured Odoo frontend(s) to call the brain from the browser.
 # In production, AI_ASSISTANT_SECRET is still required for every endpoint.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log every request with a request ID, duration, and status code."""
+    request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    request.state.request_id = request_id
+    start = time.perf_counter()
+
+    response = await call_next(request)
+
+    duration_ms = (time.perf_counter() - start) * 1000
+    response.headers["X-Request-ID"] = request_id
+    logger.info(
+        "method=%s path=%s status=%s duration_ms=%.2f request_id=%s client=%s",
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration_ms,
+        request_id,
+        request.client.host if request.client else None,
+    )
+    return response
+
+
 # ------------------------------------------------------------------
 # Endpoints
 # ------------------------------------------------------------------
 def _check_secret(x_secret: Optional[str]) -> None:
-    if AI_ASSISTANT_SECRET and x_secret != AI_ASSISTANT_SECRET:
+    if not AI_ASSISTANT_SECRET:
+        raise HTTPException(status_code=500, detail="AI assistant secret is not configured")
+    if x_secret != AI_ASSISTANT_SECRET:
         raise HTTPException(status_code=403, detail="Invalid secret")
 
 
@@ -334,10 +465,12 @@ async def health(db: AsyncSession = Depends(get_db)) -> Dict[str, Any]:
 @app.post("/chat", response_model=schemas.ChatResponse)
 async def chat(
     req: schemas.ChatRequest,
+    request: Request,
     x_ai_assistant_secret: Optional[str] = Header(None),
     db: AsyncSession = Depends(get_db),
 ) -> schemas.ChatResponse:
     _check_secret(x_ai_assistant_secret)
+    await check_chat_rate_limit(request, req.user_id)
 
     if not DEEPSEEK_API_KEY:
         raise HTTPException(status_code=500, detail="DeepSeek API key is not configured")
@@ -424,14 +557,15 @@ async def chat(
         data = response.json()
         raw_reply = data["choices"][0]["message"]["content"]
         parsed = _parse_reply(raw_reply)
+        validated_tool_request = _validate_tool_request(parsed.get("tool_request"), agent)
 
         # Persist the assistant reply.
         if parsed.get("reply"):
             assistant_content = parsed["reply"]
         elif parsed.get("skill_request"):
             assistant_content = json.dumps(parsed["skill_request"])
-        elif parsed.get("tool_request"):
-            assistant_content = json.dumps(parsed["tool_request"])
+        elif validated_tool_request:
+            assistant_content = json.dumps(validated_tool_request)
         else:
             assistant_content = ""
         assistant_message = await crud.add_message(
@@ -446,7 +580,7 @@ async def chat(
 
         return schemas.ChatResponse(
             reply=parsed.get("reply"),
-            tool_request=parsed.get("tool_request"),
+            tool_request=validated_tool_request,
             skill_request=parsed.get("skill_request"),
             session_id=str(session.id),
             sources=source_citations,
@@ -464,54 +598,20 @@ async def chat(
         raise HTTPException(status_code=500, detail=f"Unexpected error: {exc}")
 
 
-# ------------------------------------------------------------------
-# Streaming chat endpoint
-# ------------------------------------------------------------------
-async def _stream_chat(
-    db: AsyncSession,
-    req: schemas.ChatRequest,
-) -> AsyncGenerator[str, None]:
-    """Internal generator that yields SSE events for a streaming chat reply."""
-    if not DEEPSEEK_API_KEY:
-        yield _sse_event("error", "DeepSeek API key is not configured")
-        return
-
-    agent = await crud.get_agent(db, req.agent_id)
-    if not agent:
-        agent = await crud.get_default_agent(db)
-    if not agent:
-        yield _sse_event("error", "No AI agent configured")
-        return
-
-    # Resolve or create session.
-    if req.session_id:
-        session = await crud.get_session(db, req.session_id)
-        if not session:
-            yield _sse_event("error", "Session not found")
-            return
-    else:
-        session = await crud.create_session(db, req.user_id, req.context)
-
-    # Persist the user's message.
-    user_message = await crud.add_message(
-        db, str(session.id), "user", req.message, token_count=None
-    )
-
-    # Fetch recent history and relevant semantic memory.
-    recent_db_messages = await crud.get_recent_messages(db, str(session.id), limit=50)
-    recent_db_messages = list(reversed(recent_db_messages))
-
-    knowledge = await _retrieve_knowledge(
-        db, req.user_id, req.message, message_id_to_skip=user_message.id
-    )
-    relevant_snippets = knowledge["snippets"]
-    source_citations = knowledge["sources"]
-
-    messages: List[Dict[str, str]] = [{"role": "system", "content": agent.system_prompt}]
+def _build_llm_messages(
+    system_prompt: str,
+    skill_schemas: List[List[Dict[str, Any]]],
+    context: Dict[str, Any],
+    recent_messages: List[Dict[str, str]],
+    relevant_snippets: List[str],
+    user_message: str,
+) -> List[Dict[str, str]]:
+    """Assemble the message list sent to the LLM."""
+    messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
 
     tool_schema_blocks: List[str] = []
-    for skill in agent.skills:
-        for schema in skill.tool_schemas_json:
+    for schemas in skill_schemas:
+        for schema in schemas:
             tool_schema_blocks.append(json.dumps(schema))
     if tool_schema_blocks:
         messages.append(
@@ -521,8 +621,8 @@ async def _stream_chat(
             }
         )
 
-    if req.context:
-        messages.append(_build_context_message(req.context))
+    if context:
+        messages.append(_build_context_message(context))
 
     if relevant_snippets:
         citation_instruction = (
@@ -536,12 +636,81 @@ async def _stream_chat(
             }
         )
 
-    for msg in recent_db_messages:
-        messages.append({"role": msg.role, "content": msg.content})
+    messages.extend(recent_messages)
+    messages.append({"role": "user", "content": user_message})
+    return messages
 
-    messages.append({"role": "user", "content": req.message})
 
-    # Stream from DeepSeek.
+# ------------------------------------------------------------------
+# Streaming chat endpoint
+# ------------------------------------------------------------------
+async def _stream_chat(
+    req: schemas.ChatRequest,
+) -> AsyncGenerator[str, None]:
+    """Internal generator that yields SSE events for a streaming chat reply.
+
+    DB sessions are opened only for persistence work; the HTTP stream itself
+    does not hold a database connection.
+    """
+    if not DEEPSEEK_API_KEY:
+        yield _sse_event("error", "DeepSeek API key is not configured")
+        return
+
+    # ------------------------------------------------------------------
+    # Phase 1: prepare context and persist the user's message.
+    # ------------------------------------------------------------------
+    async with AsyncSessionLocal() as db:
+        agent = await crud.get_agent(db, req.agent_id)
+        if not agent:
+            agent = await crud.get_default_agent(db)
+        if not agent:
+            yield _sse_event("error", "No AI agent configured")
+            return
+
+        # Resolve or create session.
+        if req.session_id:
+            session = await crud.get_session(db, req.session_id)
+            if not session:
+                yield _sse_event("error", "Session not found")
+                return
+        else:
+            session = await crud.create_session(db, req.user_id, req.context)
+
+        session_id = str(session.id)
+
+        # Persist the user's message.
+        user_message = await crud.add_message(
+            db, session_id, "user", req.message, token_count=None
+        )
+        user_message_id = str(user_message.id)
+
+        # Fetch recent history and relevant semantic memory.
+        recent_db_messages = await crud.get_recent_messages(db, session_id, limit=50)
+        recent_db_messages = list(reversed(recent_db_messages))
+
+        knowledge = await _retrieve_knowledge(
+            db, req.user_id, req.message, message_id_to_skip=user_message.id
+        )
+        relevant_snippets = knowledge["snippets"]
+        source_citations = knowledge["sources"]
+
+        # Capture serializable state for the streaming phase.
+        system_prompt = agent.system_prompt
+        skill_schemas = [skill.tool_schemas_json or [] for skill in agent.skills]
+        recent_messages = [{"role": msg.role, "content": msg.content} for msg in recent_db_messages]
+
+    messages = _build_llm_messages(
+        system_prompt,
+        skill_schemas,
+        req.context,
+        recent_messages,
+        relevant_snippets,
+        req.message,
+    )
+
+    # ------------------------------------------------------------------
+    # Phase 2: stream tokens from DeepSeek without holding a DB session.
+    # ------------------------------------------------------------------
     full_reply = ""
     try:
         async with httpx.AsyncClient() as client:
@@ -583,52 +752,61 @@ async def _stream_chat(
         yield _sse_event("error", f"Unexpected error: {exc}")
         return
 
+    # ------------------------------------------------------------------
+    # Phase 3: persist the assistant reply and embeddings.
+    # ------------------------------------------------------------------
     parsed = _parse_reply(full_reply)
+    validated_tool_request = _validate_tool_request(parsed.get("tool_request"), skill_schemas)
     if parsed.get("reply"):
         assistant_content = parsed["reply"]
     elif parsed.get("skill_request"):
         assistant_content = json.dumps(parsed["skill_request"])
-    elif parsed.get("tool_request"):
-        assistant_content = json.dumps(parsed["tool_request"])
+    elif validated_tool_request:
+        assistant_content = json.dumps(validated_tool_request)
     else:
         assistant_content = ""
-    assistant_message = await crud.add_message(
-        db, str(session.id), "assistant", assistant_content, token_count=None
-    )
 
-    for text, msg_record in ((req.message, user_message), (assistant_content, assistant_message)):
-        embedding = await _embed_text(text)
-        if embedding:
-            await crud.save_embedding(db, str(msg_record.id), embedding)
+    async with AsyncSessionLocal() as db:
+        assistant_message = await crud.add_message(
+            db, session_id, "assistant", assistant_content, token_count=None
+        )
+
+        for text, msg_id in (
+            (req.message, user_message_id),
+            (assistant_content, str(assistant_message.id)),
+        ):
+            embedding = await _embed_text(text)
+            if embedding:
+                await crud.save_embedding(db, msg_id, embedding)
 
     if parsed.get("skill_request"):
         yield _sse_event("skill_request", json.dumps(parsed["skill_request"]))
-    elif parsed.get("tool_request"):
-        yield _sse_event("tool_request", json.dumps(parsed["tool_request"]))
+    elif validated_tool_request:
+        yield _sse_event("tool_request", json.dumps(validated_tool_request))
     else:
         yield _sse_event("reply", parsed.get("reply") or "")
 
-    yield _sse_event("done", json.dumps({"session_id": str(session.id), "sources": source_citations}))
+    yield _sse_event("done", json.dumps({"session_id": session_id, "sources": source_citations}))
 
 
 def _sse_event(event: str, data: str) -> str:
-    return f"event: {event}\ndata: {data}\n\n"
+    """Build a valid SSE event, splitting multi-line data across data: lines."""
+    lines = str(data).split("\n")
+    payload = "\n".join(f"data: {line}" for line in lines)
+    return f"event: {event}\n{payload}\n\n"
 
 
 @app.post("/chat/stream")
 async def chat_stream(
     req: schemas.ChatRequest,
+    request: Request,
     x_ai_assistant_secret: Optional[str] = Header(None),
 ) -> StreamingResponse:
     _check_secret(x_ai_assistant_secret)
-
-    async def event_generator() -> AsyncGenerator[str, None]:
-        async with AsyncSessionLocal() as db:
-            async for event in _stream_chat(db, req):
-                yield event
+    await check_chat_rate_limit(request, req.user_id)
 
     return StreamingResponse(
-        event_generator(),
+        _stream_chat(req),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -641,10 +819,12 @@ async def chat_stream(
 @app.post("/suggest", response_model=schemas.SuggestResponse)
 async def suggest(
     req: schemas.SuggestRequest,
+    request: Request,
     x_ai_assistant_secret: Optional[str] = Header(None),
     db: AsyncSession = Depends(get_db),
 ) -> schemas.SuggestResponse:
     _check_secret(x_ai_assistant_secret)
+    await check_suggest_rate_limit(request, req.user_id)
 
     if not DEEPSEEK_API_KEY:
         raise HTTPException(status_code=500, detail="DeepSeek API key is not configured")
@@ -663,8 +843,9 @@ async def suggest(
                 "Recommend a different useful next action than before."
             )
         if req.last_suggestion:
+            safe_last = _quote_for_prompt(req.last_suggestion)
             system_content += (
-                f"\n\nPrevious suggestion (do not repeat it): {req.last_suggestion}"
+                f'\n\nPrevious suggestion (do not repeat it):\n"""{safe_last}"""'
             )
 
         messages: List[Dict[str, str]] = [
@@ -692,7 +873,15 @@ async def suggest(
         data = response.json()
         raw_reply = data["choices"][0]["message"]["content"]
         parsed = _parse_suggestion(raw_reply)
-        return schemas.SuggestResponse(**parsed)
+        suggestion_text = (parsed.get("suggestion") or "").strip()
+        if not suggestion_text:
+            suggestion_text = _suggestion_fallback(req.context)
+        skill_schemas = [skill.tool_schemas_json or [] for skill in agent.skills]
+        validated_tool_request = _validate_tool_request(parsed.get("tool_request"), skill_schemas)
+        return schemas.SuggestResponse(
+            suggestion=suggestion_text,
+            tool_request=validated_tool_request,
+        )
     except HTTPException:
         raise
     except SQLAlchemyError as exc:

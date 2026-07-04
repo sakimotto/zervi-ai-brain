@@ -10,11 +10,11 @@ config:
 
 environments:
   - key: "DATABASE_URL"
-    value: "postgresql+asyncpg://user:password@zervi-pgvector:5432/ai_brain"
+    value: "${DATABASE_URL}"
   - key: "PGVECTOR_URI"
-    value: "postgresql+asyncpg://user:password@zervi-pgvector:5432/ai_brain"
+    value: "${PGVECTOR_URI}"
   - key: "OPENAI_API_KEY"
-    value: ""
+    value: "${OPENAI_API_KEY}"
   - key: "OPENAI_BASE_URL"
     value: "https://api.openai.com/v1"
   - key: "EMBEDDING_MODEL"
@@ -22,13 +22,13 @@ environments:
   - key: "EMBEDDING_DIM"
     value: "1536"
   - key: "DEEPSEEK_API_KEY"
-    value: ""
+    value: "${DEEPSEEK_API_KEY}"
   - key: "DEEPSEEK_BASE_URL"
     value: "https://api.deepseek.com/v1"
   - key: "DEEPSEEK_MODEL"
-    value: "deepseek-chat"
+    value: "${DEEPSEEK_MODEL:-deepseek-v4-pro}"
   - key: "AI_ASSISTANT_SECRET"
-    value: "change-me-in-production"
+    value: "${AI_ASSISTANT_SECRET}"
 
 ports:
   - protocol: "HTTPS"
