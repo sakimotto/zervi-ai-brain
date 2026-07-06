@@ -472,7 +472,7 @@ async def chat(
         )
 
         # Fetch recent history and relevant semantic memory.
-        recent_db_messages = await crud.get_recent_messages(db, str(session.id), limit=10)
+        recent_db_messages = await crud.get_recent_messages(db, str(session.id), limit=50)
         recent_db_messages = list(reversed(recent_db_messages))  # chronological
 
         knowledge = await _retrieve_knowledge(db, req.user_id, req.message, message_id_to_skip=user_message.id)
@@ -657,7 +657,7 @@ async def _stream_chat(
         user_message_id = str(user_message.id)
 
         # Fetch recent history and relevant semantic memory.
-        recent_db_messages = await crud.get_recent_messages(db, session_id, limit=10)
+        recent_db_messages = await crud.get_recent_messages(db, session_id, limit=50)
         recent_db_messages = list(reversed(recent_db_messages))
 
         knowledge = await _retrieve_knowledge(
