@@ -54,6 +54,9 @@ _DEFAULT_SYSTEM_PROMPT = (
     "You can see the user's current screen context (active model, record ID/res_id, view type, language), "
     "the readable fields of the record, summaries of its line items, and relevant past conversation snippets. "
     "Today's date is provided as `current_date`.\n"
+    "- The context also includes `system_info` with `odoo_version`, `installed_module_count`, `database_name`, "
+    "`active_company`, and the current `user`. Use these fields to answer administrative questions such as "
+    "'How many modules are installed?' or 'What Odoo version is this?'.\n"
     "- If the context includes `visible_records`, use them to answer questions about the list (e.g., counts, summaries, which records are done). "
     "Respect `selected_ids` when the user refers to 'these records' or asks to act on the current selection.\n"
     "- Always check the `state` / `stage_id` fields of the provided records before suggesting actions. Never suggest confirming an already confirmed order, "
@@ -87,21 +90,32 @@ _DEFAULT_SYSTEM_PROMPT = (
     "- Output ONLY a raw JSON object. No markdown formatting (no ```json), no introductory text, no explanations.\n"
     "- Use the exact schema defined below.\n\n"
     "### 5. AVAILABLE TOOLS & EXACT JSON SCHEMAS\n"
-    "Only use these tools. Use the exact parameter names provided.\n\n"
-    "1. create_activity (Low risk)\n"
+    "Only use these tools. Use the exact parameter names provided. "
+    "If the user asks for data not present in the provided context, prefer the `search_records` tool to query Odoo directly.\n\n"
+    "1. search_records (Read-only data lookup)\n"
+    '   {"tool": "search_records", "params": {"res_model": "<model_name>", "domain": [["field", "operator", "value"], ...], "fields": ["field1", "field2", ...], "limit": 50}}\n'
+    "   - Use this to answer questions like 'Show me all 113* accounts' (domain: [[\"code\", \"=like\", \"113%\"]], res_model: \"account.account\").\n"
+    "   - Do not guess record IDs; always search or use the IDs in the provided context.\n\n"
+    "2. create_activity (Low risk)\n"
     '   {"tool": "create_activity", "params": {"res_model": "<model_name>", "res_id": <integer>, "summary": "<string>", "note": "<string>", "date_deadline": "YYYY-MM-DD"}}\n\n'
-    "2. post_chatter_message (Low risk)\n"
+    "3. post_chatter_message (Low risk)\n"
     '   {"tool": "post_chatter_message", "params": {"res_model": "<model_name>", "res_id": <integer>, "message": "<string>", "message_type": "comment|note"}}\n\n'
-    "3. confirm_sales_order (HIGH RISK - UI will show confirmation card)\n"
+    "4. confirm_sales_order (HIGH RISK - UI will show confirmation card)\n"
     '   {"tool": "confirm_sales_order", "params": {"res_model": "sale.order", "res_id": <integer>, "confirmation_message": "<Explicit summary>"}}\n\n'
-    "4. validate_picking (HIGH RISK - UI will show confirmation card)\n"
+    "5. validate_picking (HIGH RISK - UI will show confirmation card)\n"
     '   {"tool": "validate_picking", "params": {"res_model": "stock.picking", "res_id": <integer>, "confirmation_message": "<Explicit summary>"}}\n\n'
-    "5. done_manufacturing_order (HIGH RISK - UI will show confirmation card)\n"
+    "6. done_manufacturing_order (HIGH RISK - UI will show confirmation card)\n"
     '   {"tool": "done_manufacturing_order", "params": {"res_model": "mrp.production", "res_id": <integer>, "confirmation_message": "<Explicit summary>"}}\n\n'
-    "6. confirm_purchase_order (HIGH RISK - UI will show confirmation card)\n"
+    "7. confirm_purchase_order (HIGH RISK - UI will show confirmation card)\n"
     '   {"tool": "confirm_purchase_order", "params": {"res_model": "purchase.order", "res_id": <integer>, "confirmation_message": "<Explicit summary>"}}\n\n'
-    "7. create_invoice (HIGH RISK - UI will show confirmation card)\n"
+    "8. create_invoice (HIGH RISK - UI will show confirmation card)\n"
     '   {"tool": "create_invoice", "params": {"res_model": "sale.order", "res_id": <integer>, "confirmation_message": "<Explicit summary>"}}\n\n'
+    "9. get_coa_summary (Read-only accounting lookup)\n"
+    '   {"tool": "get_coa_summary", "params": {"prefix": "<code_prefix>"}}\n'
+    "   - Use this to answer questions about the chart of accounts, e.g. inventory asset accounts (prefix '113'), expense accounts (prefix '5').\n\n"
+    "10. get_inventory_valuation_setup (Read-only inventory lookup)\n"
+    '   {"tool": "get_inventory_valuation_setup", "params": {}}\n'
+    "   - Use this to answer 'What cost method do we use?' or 'How is inventory valued?'.\n\n"
     "For actions on multiple selected records, replace `res_id` with `res_ids` (array of integers) and set res_model accordingly.\n\n"
     "If the user's intent is genuinely unclear, ask for clarification in one concise sentence. Interpret obvious typos and shorthand."
 )
@@ -198,10 +212,13 @@ def _parse_suggestion(text: str) -> Dict[str, Any]:
 
 
 def _tool_allowed_by_schemas(tool_name: str, skill_schemas: List[List[Dict[str, Any]]]) -> bool:
-    """Return True if the requested tool name exists in the skill schemas."""
+    """Return True if the requested tool name exists in the skill schemas.
+
+    Supports both legacy schemas keyed by 'name' and current schemas keyed by 'tool'.
+    """
     for schemas in skill_schemas:
         for schema in schemas:
-            if schema.get("name") == tool_name:
+            if schema.get("name") == tool_name or schema.get("tool") == tool_name:
                 return True
     return False
 
