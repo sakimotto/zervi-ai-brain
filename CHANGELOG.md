@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Suggest prompt now asks the model to mention specific record names/reference numbers when they are visible.
 - Default DeepSeek model aligned to `deepseek-v4-pro` in `docker-compose.prod.yml` and `.env.example`.
 
+### Fixed
+- `/documents` endpoint now passes the `offset` query parameter through to the database instead of hardcoding `0`.
+
 ## [1.0.0] - 2026-07-03
 
 ### Added
