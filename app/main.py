@@ -167,6 +167,87 @@ if OPENAI_API_KEY:
 
 
 # ------------------------------------------------------------------
+# DeepSeek retry helpers
+# ------------------------------------------------------------------
+_DEEPSEEK_RETRYABLE_STATUS = {502, 503, 504, 429}
+_DEEPSEEK_RETRY_ATTEMPTS = int(os.getenv("DEEPSEEK_RETRY_ATTEMPTS", "3"))
+_DEEPSEEK_RETRY_BACKOFF = float(os.getenv("DEEPSEEK_RETRY_BACKOFF", "1.0"))
+
+
+def _is_retryable_deepseek_error(exc: Exception) -> bool:
+    """Return True for transient DeepSeek errors that are worth retrying."""
+    if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in _DEEPSEEK_RETRYABLE_STATUS
+    return False
+
+
+async def _deepseek_post_with_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: Dict[str, str],
+    json_payload: Dict[str, Any],
+    timeout: float,
+) -> httpx.Response:
+    """POST to DeepSeek with exponential backoff on transient errors."""
+    last_exception: Optional[Exception] = None
+    for attempt in range(_DEEPSEEK_RETRY_ATTEMPTS):
+        try:
+            response = await client.post(url, headers=headers, json=json_payload, timeout=timeout)
+            response.raise_for_status()
+            return response
+        except Exception as exc:
+            last_exception = exc
+            if not _is_retryable_deepseek_error(exc):
+                break
+            if attempt < _DEEPSEEK_RETRY_ATTEMPTS - 1:
+                wait = _DEEPSEEK_RETRY_BACKOFF * (2 ** attempt)
+                logger.warning(
+                    "DeepSeek POST failed (attempt %d/%d): %s. Retrying in %.1fs...",
+                    attempt + 1,
+                    _DEEPSEEK_RETRY_ATTEMPTS,
+                    exc,
+                    wait,
+                )
+                await asyncio.sleep(wait)
+    raise last_exception
+
+
+@asynccontextmanager
+async def _deepseek_stream_with_retry(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: Dict[str, str],
+    json_payload: Dict[str, Any],
+    timeout: float,
+) -> AsyncGenerator[httpx.Response, None]:
+    """Stream from DeepSeek with exponential backoff on transient connection errors."""
+    last_exception: Optional[Exception] = None
+    for attempt in range(_DEEPSEEK_RETRY_ATTEMPTS):
+        try:
+            async with client.stream("POST", url, headers=headers, json=json_payload, timeout=timeout) as response:
+                response.raise_for_status()
+                yield response
+                return
+        except Exception as exc:
+            last_exception = exc
+            if not _is_retryable_deepseek_error(exc):
+                break
+            if attempt < _DEEPSEEK_RETRY_ATTEMPTS - 1:
+                wait = _DEEPSEEK_RETRY_BACKOFF * (2 ** attempt)
+                logger.warning(
+                    "DeepSeek stream failed (attempt %d/%d): %s. Retrying in %.1fs...",
+                    attempt + 1,
+                    _DEEPSEEK_RETRY_ATTEMPTS,
+                    exc,
+                    wait,
+                )
+                await asyncio.sleep(wait)
+    raise last_exception
+
+
+# ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
 def _extract_json(text: str) -> Optional[Any]:
@@ -532,21 +613,22 @@ async def chat(
 
         messages.append({"role": "user", "content": req.message})
 
-        # Call DeepSeek.
-        response = await httpx.AsyncClient().post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": DEEPSEEK_MODEL,
-                "messages": messages,
-                "max_tokens": 1024,
-            },
-            timeout=60.0,
-        )
-        response.raise_for_status()
+        # Call DeepSeek with retry on transient errors.
+        async with httpx.AsyncClient() as client:
+            response = await _deepseek_post_with_retry(
+                client,
+                f"{DEEPSEEK_BASE_URL}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json_payload={
+                    "model": DEEPSEEK_MODEL,
+                    "messages": messages,
+                    "max_tokens": 1024,
+                },
+                timeout=60.0,
+            )
         data = response.json()
         raw_reply = data["choices"][0]["message"]["content"]
         parsed = _parse_reply(raw_reply)
@@ -699,14 +781,14 @@ async def _stream_chat(
     full_reply = ""
     try:
         async with httpx.AsyncClient() as client:
-            async with client.stream(
-                "POST",
+            async with _deepseek_stream_with_retry(
+                client,
                 f"{DEEPSEEK_BASE_URL}/chat/completions",
                 headers={
                     "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
                     "Content-Type": "application/json",
                 },
-                json={
+                json_payload={
                     "model": DEEPSEEK_MODEL,
                     "messages": messages,
                     "max_tokens": 1024,
@@ -714,7 +796,6 @@ async def _stream_chat(
                 },
                 timeout=60.0,
             ) as response:
-                response.raise_for_status()
                 async for line in response.aiter_lines():
                     if not line.startswith("data:"):
                         continue
@@ -831,21 +912,22 @@ async def suggest(
         if req.context:
             messages.append(_build_context_message(req.context))
 
-        response = await httpx.AsyncClient().post(
-            f"{DEEPSEEK_BASE_URL}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": DEEPSEEK_MODEL,
-                "messages": messages,
-                "max_tokens": 512,
-                "temperature": 0.8 if req.refresh else 0.3,
-            },
-            timeout=60.0,
-        )
-        response.raise_for_status()
+        async with httpx.AsyncClient() as client:
+            response = await _deepseek_post_with_retry(
+                client,
+                f"{DEEPSEEK_BASE_URL}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json_payload={
+                    "model": DEEPSEEK_MODEL,
+                    "messages": messages,
+                    "max_tokens": 512,
+                    "temperature": 0.8 if req.refresh else 0.3,
+                },
+                timeout=60.0,
+            )
         data = response.json()
         raw_reply = data["choices"][0]["message"]["content"]
         parsed = _parse_suggestion(raw_reply)
