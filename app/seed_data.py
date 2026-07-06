@@ -105,7 +105,7 @@ Rules:
 DEPARTMENT_SKILLS: Dict[str, List[str]] = {
     "Sales Agent": ["Low_Risk_Tools", "Sales_Tools", "Invoicing_Tools", "Search_Tools"],
     "Purchasing Agent": ["Low_Risk_Tools", "Purchasing_Tools", "Search_Tools"],
-    "Accounting Agent": ["Low_Risk_Tools", "Invoicing_Tools", "Search_Tools"],
+    "Accounting Agent": ["Low_Risk_Tools", "Invoicing_Tools", "Search_Tools", "Accounting_Tools"],
     "Warehouse Agent": ["Low_Risk_Tools", "Inventory_Tools", "Search_Tools"],
     "Manufacturing Agent": ["Low_Risk_Tools", "Manufacturing_Tools", "Search_Tools"],
     "HR Agent": ["Low_Risk_Tools", "Search_Tools"],

@@ -138,6 +138,31 @@ async def ensure_default_agent_and_skills(db: AsyncSession, default_prompt: str)
                         "res_id": "integer",
                         "confirmation_message": "string",
                     },
+                },
+                {
+                    "tool": "get_inventory_valuation_setup",
+                    "description": (
+                        "Return the inventory valuation setup for all product categories, "
+                        "including cost method, valuation method, and stock valuation/input/output accounts. "
+                        "Use this to answer questions like 'What cost method do we use?' or 'How is inventory valued?'"
+                    ),
+                    "params": {},
+                },
+            ],
+        },
+        {
+            "name": "Accounting_Tools",
+            "tool_schemas_json": [
+                {
+                    "tool": "get_coa_summary",
+                    "description": (
+                        "Return a grouped summary of the chart of accounts for a given code prefix. "
+                        "Use this to answer questions like 'How does our COA manage inventory write-downs?' "
+                        "by calling it with prefix '113' for inventory asset accounts and '5' for expense accounts."
+                    ),
+                    "params": {
+                        "prefix": "string (optional, e.g. '113' or '5')",
+                    },
                 }
             ],
         },
@@ -160,12 +185,17 @@ async def ensure_default_agent_and_skills(db: AsyncSession, default_prompt: str)
             "tool_schemas_json": [
                 {
                     "tool": "search_records",
-                    "description": "Search Odoo records by model and domain and return a compact summary.",
+                    "description": (
+                        "Search Odoo records by model and domain and return a compact summary. "
+                        "Use this whenever the user asks for data that is not in the provided screen context. "
+                        "Examples: search account.account with domain [['code','=like','113%']] to list inventory asset accounts; "
+                        "search product.template with domain [['type','=','product']] to list storable products."
+                    ),
                     "params": {
-                        "res_model": "string",
+                        "res_model": "string (Odoo model technical name, e.g. 'account.account')",
                         "domain": "list of domain tuples, e.g. [['state','=','draft']]",
-                        "limit": "integer (optional, default 20)",
-                        "fields": "list of field names to read (optional)",
+                        "limit": "integer (optional, default 50, max 100)",
+                        "fields": "list of field names to read (optional, e.g. ['code','name','account_type'])",
                     },
                 }
             ],
