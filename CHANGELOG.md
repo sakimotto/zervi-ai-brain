@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - `/documents` endpoint now passes the `offset` query parameter through to the database instead of hardcoding `0`.
+- `/chat/stream` emits an immediate SSE comment keep-alive so browsers/proxies don't drop the connection before DeepSeek returns the first token.
+- Reduced chat history context from 50 to 10 recent messages to lower prompt size and improve response latency.
 
 ## [1.0.0] - 2026-07-03
 
