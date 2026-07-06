@@ -962,8 +962,11 @@ async def list_documents(
     db: AsyncSession = Depends(get_db),
 ) -> List[schemas.DocumentOut]:
     _check_secret(x_ai_assistant_secret)
-    docs = await crud.list_documents(db, source=source, content_type=content_type, limit=limit * 4, offset=0)
+    docs = await crud.list_documents(
+        db, source=source, content_type=content_type, limit=limit * 4, offset=offset
+    )
     # Group chunk rows by their document group_id and return one representative per document.
+    # Note: because documents are chunked, offset/limit operate on chunks, not whole documents.
     seen_groups = set()
     representatives = []
     for doc in docs:
