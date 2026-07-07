@@ -5,18 +5,24 @@ from app.main import _parse_reply, _parse_suggestion
 
 class TestParseReply:
     def test_plain_reply(self):
-        assert _parse_reply("Hello!") == {"reply": "Hello!"}
+        assert _parse_reply("Hello!") == {
+            "reply": "Hello!",
+            "tool_request": None,
+            "multi_tool_requests": None,
+        }
 
     def test_tool_request_json(self):
         text = '{"tool": "confirm_sales_order", "params": {"id": 42}}'
         assert _parse_reply(text) == {
-            "tool_request": {"tool": "confirm_sales_order", "params": {"id": 42}}
+            "tool_request": {"tool": "confirm_sales_order", "params": {"id": 42}},
+            "multi_tool_requests": None,
         }
 
     def test_tool_request_in_markdown_fence(self):
         text = '```json\n{"tool": "confirm_sales_order", "params": {"id": 42}}\n```'
         assert _parse_reply(text) == {
-            "tool_request": {"tool": "confirm_sales_order", "params": {"id": 42}}
+            "tool_request": {"tool": "confirm_sales_order", "params": {"id": 42}},
+            "multi_tool_requests": None,
         }
 
     def test_tool_request_with_explanation_text(self):
@@ -25,12 +31,17 @@ class TestParseReply:
             '```json\n{"tool": "confirm_sales_order", "params": {"id": 7}}\n```'
         )
         assert _parse_reply(text) == {
-            "tool_request": {"tool": "confirm_sales_order", "params": {"id": 7}}
+            "tool_request": {"tool": "confirm_sales_order", "params": {"id": 7}},
+            "multi_tool_requests": None,
         }
 
     def test_invalid_json_treated_as_reply(self):
         text = "Here is the info: {not valid json"
-        assert _parse_reply(text) == {"reply": text}
+        assert _parse_reply(text) == {
+            "reply": text,
+            "tool_request": None,
+            "multi_tool_requests": None,
+        }
 
 
 class TestParseSuggestion:
