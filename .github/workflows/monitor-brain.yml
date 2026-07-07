@@ -1,0 +1,68 @@
+name: Monitor Saki Brain Health
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.check.outputs.status }}
+      body: ${{ steps.check.outputs.body }}
+    steps:
+      - name: Check brain health
+        id: check
+        run: |
+          response=$(curl -s -w "\n%{http_code}" https://zervi-ai-brain-u34072.vm.elestio.app/health || true)
+          body=$(echo "$response" | sed '$d')
+          code=$(echo "$response" | tail -n1)
+          echo "body=$body" >> "$GITHUB_OUTPUT"
+          echo "status=$code" >> "$GITHUB_OUTPUT"
+          echo "HTTP status: $code"
+          echo "Response: $body"
+          if [ "$code" != "200" ]; then
+            echo "Health check failed"
+            exit 1
+          fi
+
+  alert-on-failure:
+    runs-on: ubuntu-latest
+    needs: health-check
+    if: failure()
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update outage issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          existing=$(gh issue list --label brain-outage --state open --json number --jq '.[0].number' || true)
+          timestamp=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          if [ -z "$existing" ]; then
+            gh issue create \
+              --title "🚨 Saki Brain health check failed" \
+              --body "Health check failed at ${timestamp}.\n\n- URL: https://zervi-ai-brain-u34072.vm.elestio.app/health\n- Status: ${{ needs.health-check.outputs.status }}\n- Response: ${{ needs.health-check.outputs.body }}\n\nSee runbook: docs/runbooks/recover-brain-502.md" \
+              --label brain-outage
+          else
+            gh issue comment "$existing" \
+              --body "Health check still failing at ${timestamp}.\n\n- Status: ${{ needs.health-check.outputs.status }}\n- Response: ${{ needs.health-check.outputs.body }}"
+          fi
+
+  clear-alert-on-recovery:
+    runs-on: ubuntu-latest
+    needs: health-check
+    if: success()
+    permissions:
+      issues: write
+    steps:
+      - name: Close any open outage issues
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          timestamp=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          for number in $(gh issue list --label brain-outage --state open --json number --jq '.[].number'); do
+            gh issue comment "$number" --body "Health check recovered at ${timestamp}. Closing."
+            gh issue close "$number"
+          done
