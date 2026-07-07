@@ -84,17 +84,31 @@ _DEFAULT_SYSTEM_PROMPT = (
     "Include relevant IDs, states, dates, amounts, and related records when they are in the context.\n"
     "- When you reference a specific record whose ID is in the provided context, make it clickable with `[Display Text](action:model/res_id)`.\n"
     "- For simple greetings or yes/no questions, keep the answer short. For record/page/task summaries, be thorough but organised.\n"
+    "- **NEVER include raw JSON or tool schemas in Mode A.** If you are not executing an action, do not output JSON.\n"
+    "- Address the user by their first name when it is provided in the context (`user_name`).\n"
     "- End record summaries with 1-3 concrete next actions or questions the user can follow up with.\n\n"
     "Mode B: EXPLICIT ACTION EXECUTION\n"
     "- ONLY use this mode when the user has explicitly commanded an action.\n"
-    "- Output ONLY a raw JSON object. No markdown formatting (no ```json), no introductory text, no explanations.\n"
+    "- Output ONLY raw JSON. No markdown formatting (no ```json), no introductory text, no explanations, no trailing prose.\n"
+    "- Use one of the two exact formats below.\n"
+    "- For a single action, return a JSON object:\n"
+    '   {"tool": "<tool_name>", "params": {<parameters>}}\n'
+    "- For multiple related searches/lookups at once, return a JSON array of objects:\n"
+    '   [{"tool": "search_records", "params": {...}}, {"tool": "get_coa_summary", "params": {...}}]\n'
+    "- When returning an array, the first valid/allowed tool will be executed first. The rest should be related lookups the user asked for.\n"
+    "- After emitting the JSON, stop. Do not add a conversational follow-up in the same message.\n"
     "- Use the exact schema defined below.\n\n"
     "### 5. AVAILABLE TOOLS & EXACT JSON SCHEMAS\n"
     "Only use these tools. Use the exact parameter names provided. "
     "If the user asks for data not present in the provided context, prefer the `search_records` tool to query Odoo directly.\n\n"
     "1. search_records (Read-only data lookup)\n"
     '   {"tool": "search_records", "params": {"res_model": "<model_name>", "domain": [["field", "operator", "value"], ...], "fields": ["field1", "field2", ...], "limit": 50}}\n'
-    "   - Use this to answer questions like 'Show me all 113* accounts' (domain: [[\"code\", \"=like\", \"113%\"]], res_model: \"account.account\").\n"
+    "   - domain values must be valid JSON: strings in quotes, booleans as true/false, numbers as numbers, null as null.\n"
+    "   - Examples:\n"
+    '     domain: [["type", "=", "product"], ["sale_ok", "=", true]]\n'
+    '     domain: [["state", "in", ["confirmed", "progress"]]]\n'
+    '     domain: [["code", "=like", "113%"]]\n'
+    "   - Use this to answer questions like 'Show me all 113* accounts' (res_model: \"account.account\", domain: [[\"code\", \"=like\", \"113%\"]]).\n"
     "   - Do not guess record IDs; always search or use the IDs in the provided context.\n\n"
     "2. create_activity (Low risk)\n"
     '   {"tool": "create_activity", "params": {"res_model": "<model_name>", "res_id": <integer>, "summary": "<string>", "note": "<string>", "date_deadline": "YYYY-MM-DD"}}\n\n'
@@ -164,6 +178,15 @@ def _suggestion_fallback(context: Optional[Dict[str, Any]]) -> str:
 openai_client: Optional[AsyncOpenAI] = None
 if OPENAI_API_KEY:
     openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
+
+
+# ------------------------------------------------------------------
+# LLM output budget
+# ------------------------------------------------------------------
+# DeepSeek v4-pro has a huge context window. For an ERP assistant, truncated
+# replies (especially JSON tool calls) are far more expensive than tokens.
+_MAX_TOKENS_CHAT = int(os.getenv("MAX_TOKENS_CHAT", "4096"))
+_MAX_TOKENS_SUGGEST = int(os.getenv("MAX_TOKENS_SUGGEST", "512"))
 
 
 # ------------------------------------------------------------------
@@ -251,7 +274,94 @@ async def _deepseek_stream_with_retry(
 # Helpers
 # ------------------------------------------------------------------
 def _extract_json(text: str) -> Optional[Any]:
-    """Try to extract a JSON object/array from a string, even inside markdown."""
+    """Try to extract a JSON object/array from a string, even inside markdown.
+
+    Strategy:
+      1. Strip markdown fences and try the whole string as JSON.
+      2. Look for the first {...} block that parses as a valid dict.
+         For tool requests, require both 'tool' and 'params' keys so
+         conversational text with braces does not collide.
+      3. Look for the first [...] block that parses as a valid list of
+         tool-shaped dicts (each contains 'tool' and 'params').
+      4. Otherwise return None.
+    """
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+        cleaned = cleaned.strip()
+
+    # Whole string may already be JSON.
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            if "tool" in parsed and "params" in parsed:
+                return parsed
+            # Whole string is a non-tool dict; do not treat as a tool request.
+            return None
+        if isinstance(parsed, list) and all(
+            isinstance(item, dict) and "tool" in item and "params" in item
+            for item in parsed
+        ):
+            return parsed
+        return None
+    except json.JSONDecodeError:
+        pass
+
+    # Fallback 1: find the first {...} block that parses as a tool request.
+    for match in re.finditer(r"\{.*\}", cleaned, re.DOTALL):
+        try:
+            parsed = json.loads(match.group(0))
+            if isinstance(parsed, dict) and "tool" in parsed and "params" in parsed:
+                return parsed
+        except json.JSONDecodeError:
+            continue
+
+    # Fallback 2: find the first [...] block that parses as a list of tools.
+    for match in re.finditer(r"\[.*\]", cleaned, re.DOTALL):
+        try:
+            parsed = json.loads(match.group(0))
+            if isinstance(parsed, list) and all(
+                isinstance(item, dict) and "tool" in item and "params" in item
+                for item in parsed
+            ):
+                return parsed
+        except json.JSONDecodeError:
+            continue
+
+    return None
+
+
+def _parse_reply(text: str) -> Dict[str, Any]:
+    """Parse a chat reply.
+
+    Supports:
+      - Plain text replies.
+      - A single tool request: {"tool": "...", "params": {...}}
+      - Multiple tool requests: [{"tool": "...", "params": {...}}, ...]
+
+    When multiple tool requests are returned, only the first allowed/valid one
+    is exposed for execution. The others are preserved in the raw text so the
+    frontend can display what Saki intended to do.
+    """
+    data = _extract_json(text)
+    if isinstance(data, dict) and "tool" in data and "params" in data:
+        return {"tool_request": data, "multi_tool_requests": None}
+    if isinstance(data, list):
+        valid_tools = [
+            item for item in data
+            if isinstance(item, dict) and "tool" in item and "params" in item
+        ]
+        if valid_tools:
+            return {
+                "tool_request": valid_tools[0],
+                "multi_tool_requests": valid_tools,
+            }
+    return {"reply": text.strip(), "tool_request": None, "multi_tool_requests": None}
+
+
+def _parse_suggestion(text: str) -> Dict[str, Any]:
+    """Parse a suggestion reply, supporting markdown-fenced JSON."""
     cleaned = text.strip()
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
@@ -259,37 +369,19 @@ def _extract_json(text: str) -> Optional[Any]:
         cleaned = cleaned.strip()
 
     try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        pass
+        data = json.loads(cleaned)
+    except (json.JSONDecodeError, ValueError):
+        return {"suggestion": text.strip()[:500], "tool_request": None}
 
-    # Fallback: find the first {...} block that parses as JSON.
-    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(0))
-        except json.JSONDecodeError:
-            pass
-
-    return None
-
-
-def _parse_reply(text: str) -> Dict[str, Any]:
-    data = _extract_json(text)
-    if isinstance(data, dict) and "tool" in data and "params" in data:
-        return {"tool_request": data}
-    return {"reply": text.strip()}
-
-
-def _parse_suggestion(text: str) -> Dict[str, Any]:
-    data = _extract_json(text)
     if isinstance(data, dict) and "suggestion" in data:
         tool_request = data.get("tool_request")
         if tool_request and not isinstance(tool_request, dict):
             tool_request = None
-        return {"suggestion": data["suggestion"], "tool_request": tool_request}
-    cleaned = text.strip()
-    return {"suggestion": cleaned[:500], "tool_request": None}
+        if tool_request and ("tool" not in tool_request or "params" not in tool_request):
+            tool_request = None
+        return {"suggestion": str(data["suggestion"]), "tool_request": tool_request}
+
+    return {"suggestion": text.strip()[:500], "tool_request": None}
 
 
 def _tool_allowed_by_schemas(tool_name: str, skill_schemas: List[List[Dict[str, Any]]]) -> bool:
@@ -418,6 +510,11 @@ async def _retrieve_knowledge(
 
 def _build_context_message(context: Dict[str, Any]) -> Dict[str, str]:
     ctx = context or {}
+    user_name = ctx.get("user_name") or (ctx.get("user") or {}).get("name")
+    if user_name:
+        greeting = f"The current user's first name is {user_name}. Address them by this name.\n\n"
+    else:
+        greeting = ""
     # Serialize context as pretty JSON inside a fenced block so model output
     # in context values cannot break out of the system instructions.
     try:
@@ -426,7 +523,7 @@ def _build_context_message(context: Dict[str, Any]) -> Dict[str, str]:
         context_json = str(ctx)
     return {
         "role": "system",
-        "content": "Current Odoo context (JSON):\n```json\n" + context_json + "\n```",
+        "content": greeting + "Current Odoo context (JSON):\n```json\n" + context_json + "\n```",
     }
 
 
@@ -625,7 +722,7 @@ async def chat(
                 json_payload={
                     "model": DEEPSEEK_MODEL,
                     "messages": messages,
-                    "max_tokens": 1024,
+                    "max_tokens": _MAX_TOKENS_CHAT,
                 },
                 timeout=60.0,
             )
@@ -791,7 +888,7 @@ async def _stream_chat(
                 json_payload={
                     "model": DEEPSEEK_MODEL,
                     "messages": messages,
-                    "max_tokens": 1024,
+                    "max_tokens": _MAX_TOKENS_CHAT,
                     "stream": True,
                 },
                 timeout=60.0,
