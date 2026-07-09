@@ -1020,7 +1020,7 @@ async def suggest(
                 json_payload={
                     "model": DEEPSEEK_MODEL,
                     "messages": messages,
-                    "max_tokens": 512,
+                    "max_tokens": _MAX_TOKENS_SUGGEST,
                     "temperature": 0.8 if req.refresh else 0.3,
                 },
                 timeout=60.0,
