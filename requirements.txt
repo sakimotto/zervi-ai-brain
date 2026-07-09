@@ -8,3 +8,6 @@ asyncpg
 pgvector
 alembic
 openai
+pypdf
+pytest
+pytest-asyncio
