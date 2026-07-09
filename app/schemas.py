@@ -5,6 +5,17 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
+class Attachment(BaseModel):
+    id: int
+    name: str
+    mimetype: str
+    size: Optional[int] = None
+    access_url: str = Field(..., alias="access_url")
+    extracted_text: Optional[str] = Field(default=None, alias="extracted_text")
+
+    model_config = {"populate_by_name": True}
+
+
 class ChatMessage(BaseModel):
     role: str = Field(..., pattern="^(system|user|assistant|tool)$")
     content: str
@@ -16,6 +27,7 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     agent_id: int = 1
     context: Dict[str, Any] = Field(default_factory=dict)
+    attachments: List[Attachment] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):

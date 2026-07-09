@@ -23,7 +23,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import crud, schemas
+from . import attachments, crud, schemas
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,9 @@ _DEFAULT_SYSTEM_PROMPT = (
     "Respect `selected_ids` when the user refers to 'these records' or asks to act on the current selection.\n"
     "- Always check the `state` / `stage_id` fields of the provided records before suggesting actions. Never suggest confirming an already confirmed order, "
     "or validating an already completed picking.\n"
-    "- If the context includes `selected_ids` and the user refers to 'these records', use those IDs. Never guess IDs.\n\n"
+    "- If the context includes `selected_ids` and the user refers to 'these records', use those IDs. Never guess IDs.\n"
+    "- The user can attach files (text, CSV, PDF, images). When files are provided, their content or a description "
+    "is included in the conversation. Use the content to answer questions about the files.\n\n"
     "### 2. STRICT GUARD RAILS (Follow Exactly)\n"
     "- Zero Hallucination: Only state facts present in the provided context or conversation history. "
     'If data is missing, say: "I cannot see that information in the current record."\n'
@@ -527,6 +529,16 @@ def _build_context_message(context: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
+async def _build_attachment_context_message(
+    attachments: List[Dict[str, Any]],
+) -> Optional[Dict[str, str]]:
+    """Build a system message describing attached files and extracted text."""
+    context_text = await attachments.build_attachment_context(attachments)
+    if not context_text:
+        return None
+    return {"role": "system", "content": context_text}
+
+
 def _quote_for_prompt(text: str, max_length: int = 500) -> str:
     """Quote a user-supplied string so it cannot escape system instructions."""
     text = text or ""
@@ -675,40 +687,17 @@ async def chat(
         source_citations = knowledge["sources"]
 
         # Build LLM messages.
-        messages: List[Dict[str, str]] = [{"role": "system", "content": agent.system_prompt}]
-
-        # Inject available tool schemas from the agent's skills.
-        tool_schema_blocks: List[str] = []
-        for skill in agent.skills:
-            for schema in skill.tool_schemas_json:
-                tool_schema_blocks.append(json.dumps(schema))
-        if tool_schema_blocks:
-            messages.append(
-                {
-                    "role": "system",
-                    "content": "Available tool schemas:\n" + "\n".join(tool_schema_blocks),
-                }
-            )
-
-        if req.context:
-            messages.append(_build_context_message(req.context))
-
-        if relevant_snippets:
-            citation_instruction = (
-                "\n\nWhen you use the retrieved information above, cite the source in your answer "
-                "using a short tag like [doc:source:title] or [fact:category:key]."
-            )
-            messages.append(
-                {
-                    "role": "system",
-                    "content": "Retrieved knowledge:\n" + "\n---\n".join(relevant_snippets) + citation_instruction,
-                }
-            )
-
-        for msg in recent_db_messages:
-            messages.append({"role": msg.role, "content": msg.content})
-
-        messages.append({"role": "user", "content": req.message})
+        recent_messages = [{"role": msg.role, "content": msg.content} for msg in recent_db_messages]
+        skill_schemas = [skill.tool_schemas_json for skill in agent.skills]
+        messages = await _build_llm_messages(
+            agent.system_prompt,
+            skill_schemas,
+            req.context,
+            recent_messages,
+            relevant_snippets,
+            req.message,
+            [att.model_dump(by_alias=True) for att in req.attachments] if req.attachments else None,
+        )
 
         # Call DeepSeek with retry on transient errors.
         async with httpx.AsyncClient() as client:
@@ -762,16 +751,17 @@ async def chat(
         raise HTTPException(status_code=500, detail=f"Unexpected error: {exc}")
 
 
-def _build_llm_messages(
+async def _build_llm_messages(
     system_prompt: str,
     skill_schemas: List[List[Dict[str, Any]]],
     context: Dict[str, Any],
     recent_messages: List[Dict[str, str]],
     relevant_snippets: List[str],
     user_message: str,
-) -> List[Dict[str, str]]:
+    attachments: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
     """Assemble the message list sent to the LLM."""
-    messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
+    messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
 
     tool_schema_blocks: List[str] = []
     for schemas in skill_schemas:
@@ -800,8 +790,19 @@ def _build_llm_messages(
             }
         )
 
+    if attachments:
+        attachment_context = await _build_attachment_context_message(attachments)
+        if attachment_context:
+            messages.append(attachment_context)
+
     messages.extend(recent_messages)
-    messages.append({"role": "user", "content": user_message})
+
+    if attachments:
+        processed = await attachments.process_attachments(attachments)
+        messages.append(attachments.build_user_message_with_attachments(user_message, processed))
+    else:
+        messages.append({"role": "user", "content": user_message})
+
     return messages
 
 
@@ -863,13 +864,14 @@ async def _stream_chat(
         skill_schemas = [skill.tool_schemas_json or [] for skill in agent.skills]
         recent_messages = [{"role": msg.role, "content": msg.content} for msg in recent_db_messages]
 
-    messages = _build_llm_messages(
+    messages = await _build_llm_messages(
         system_prompt,
         skill_schemas,
         req.context,
         recent_messages,
         relevant_snippets,
         req.message,
+        [att.model_dump(by_alias=True) for att in req.attachments] if req.attachments else None,
     )
 
     # ------------------------------------------------------------------

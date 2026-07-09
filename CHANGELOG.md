@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `/chat/stream` endpoint for Server-Sent Events (SSE) token-by-token replies.
+- Attachment support in `/chat` and `/chat/stream`:
+  - `Attachment` schema and `attachments` field on `ChatRequest`.
+  - Downloads files from Odoo `/web/content` URLs, extracts text from TXT/CSV/PDF,
+    and encodes images as base64 data URLs for vision-capable models.
+  - Injects extracted attachment content into the LLM prompt and system context.
+  - Added `pypdf` dependency and unit tests for text, PDF, image, and unsupported
+    attachments plus size-limit and download-failure handling.
 
 ### Changed
 - Suggest prompt now asks the model to mention specific record names/reference numbers when they are visible.
