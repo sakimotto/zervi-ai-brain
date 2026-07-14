@@ -496,6 +496,7 @@ async def create_fact(
     value: str,
     embedding: Optional[List[float]] = None,
     is_shared: bool = False,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> models.Fact:
     fact = models.Fact(
         user_id=user_id,
@@ -504,6 +505,7 @@ async def create_fact(
         value=value,
         embedding=embedding,
         is_shared=is_shared,
+        metadata_json=metadata or {},
     )
     db.add(fact)
     await db.commit()
