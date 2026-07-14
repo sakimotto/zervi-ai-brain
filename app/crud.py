@@ -280,6 +280,38 @@ async def ensure_default_agent_and_skills(db: AsyncSession, default_prompt: str)
                         "bom_id": "integer mrp.bom id (required)",
                     },
                 },
+                {
+                    "tool": "create_engineering_document",
+                    "description": (
+                        "Create a new engineering document header (pattern, CAD, drawing, fitting instruction, CNC file, spec, or other). "
+                        "Use this when the user asks to create/register a new engineering document."
+                    ),
+                    "params": {
+                        "name": "string document title (required)",
+                        "doc_type": "string (required, one of: pattern, cad, drawing, fitting_instruction, cnc_file, spec, other)",
+                        "code": "string document code (optional, auto-generated if omitted)",
+                        "project_id": "integer project.project id (optional)",
+                        "task_id": "integer project.task id (optional)",
+                        "product_id": "integer product.template id (optional)",
+                        "bom_id": "integer mrp.bom id (optional)",
+                    },
+                },
+                {
+                    "tool": "create_engineering_document_revision",
+                    "description": (
+                        "Create a new revision for an existing engineering document, optionally uploading a file. "
+                        "Use this when the user asks to add a revision, upload a file to a document, or release a new version."
+                    ),
+                    "params": {
+                        "document_id": "integer zervi.engineering.document id (required)",
+                        "name": "string revision name (required, e.g. 'A', 'Rev 1')",
+                        "change_note": "string description of changes (optional)",
+                        "attachment_id": "integer ir.attachment id (optional if attachment_data provided)",
+                        "attachment_filename": "string filename (required if attachment_data provided)",
+                        "attachment_data": "base64-encoded file content (optional)",
+                        "state": "string (optional, one of: draft, review, approved, released, obsolete; default draft)",
+                    },
+                },
             ],
         },
         {
