@@ -86,6 +86,22 @@ Rules:
 - Be structured and specific: mention MO references, products, quantities, and component status. Use headings and bullet points for record summaries.
 """,
 
+    "Engineering Agent": """You are the Zervi Engineering Agent, an expert in R&D, product development, and engineering document management for Zervi's manufacturing operations.
+
+Your responsibilities:
+- Help users find and manage engineering documents: patterns, CAD files, sewing assembly drawings, fitting instructions, CNC cut files, specifications, and revision histories.
+- Help users track engineering projects and tasks across pattern development, CAD development, sample creation, fitting, and BOM linking.
+- Suggest next actions: search for an existing document, create a new engineering project, add a task to a project, link a BOM to a project, or review open engineering work.
+- Use the visible record context (active project, task, document, product, or BOM) to give specific, named recommendations.
+- Cite sources when you use retrieved knowledge or past conversations.
+
+Rules:
+- Never create, modify, or link engineering records without the user's explicit confirmation.
+- Always show a confirmation message that includes the project name, document code, or BOM reference before calling a high-risk tool.
+- If a document, project, or BOM is missing, ask the user before guessing.
+- Be structured and specific: mention document codes, project names, task subtypes, states, and revision details. Use headings and bullet points for record summaries.
+""",
+
     "HR Agent": """You are the Zervi HR Agent, an expert in employee records, contracts, leave, and timesheets.
 
 Your responsibilities:
@@ -108,6 +124,7 @@ DEPARTMENT_SKILLS: Dict[str, List[str]] = {
     "Accounting Agent": ["Low_Risk_Tools", "Invoicing_Tools", "Search_Tools", "Accounting_Tools"],
     "Warehouse Agent": ["Low_Risk_Tools", "Inventory_Tools", "Search_Tools"],
     "Manufacturing Agent": ["Low_Risk_Tools", "Manufacturing_Tools", "Search_Tools"],
+    "Engineering Agent": ["Low_Risk_Tools", "Engineering_Tools", "Search_Tools"],
     "HR Agent": ["Low_Risk_Tools", "Search_Tools"],
 }
 
@@ -266,6 +283,36 @@ DEPARTMENT_DOCUMENTS: List[Dict[str, Any]] = [
         "metadata": {"department": "manufacturing"},
     },
     {
+        "source": "engineering",
+        "title": "Zervi Engineering Document Control",
+        "content_type": "procedure",
+        "content": """Zervi Engineering Document Control
+
+1. Document types
+   - pattern: sewing patterns for seat covers, tents, garments, and fitness products.
+   - cad: CAD files and digital patterns.
+   - drawing: sewing assembly drawings and construction details.
+   - fitting_instruction: fit-check and installation instructions.
+   - cnc_file: CNC cutter files for fabric or foam.
+   - spec: material, product, or process specifications.
+
+2. Revision control
+   - Every document has a current revision linked to an ir.attachment.
+   - Revisions move through states: draft, review, approved, released, obsolete.
+   - Only approved or released revisions should be used for production.
+
+3. Project linkage
+   - Engineering projects group related pattern, CAD, drawing, and CNC tasks.
+   - BOMs can be linked to engineering projects to track product structure development.
+
+4. Responsibilities
+   - Engineering users create and update documents and tasks.
+   - Engineering approvers approve revisions and release documents.
+   - Manufacturing uses released documents for production.
+""",
+        "metadata": {"department": "engineering"},
+    },
+    {
         "source": "hr",
         "title": "Zervi HR Quick Reference",
         "content_type": "policy",
@@ -321,6 +368,9 @@ DEPARTMENT_FACTS: List[Dict[str, Any]] = [
     {"category": "warehouse", "key": "backorder_review", "value": "Backorders are reviewed daily and prioritized by promised date."},
     {"category": "manufacturing", "key": "mo_done_rule", "value": "A manufacturing order is marked done only when all operations are complete and output is received."},
     {"category": "manufacturing", "key": "scrap_logging", "value": "Scrap or rework is recorded immediately with a reason code."},
+    {"category": "engineering", "key": "document_revision_states", "value": "Engineering document revisions move through states: draft, review, approved, released, obsolete."},
+    {"category": "engineering", "key": "released_document_rule", "value": "Only approved or released engineering revisions should be used for production."},
+    {"category": "engineering", "key": "bom_linkage", "value": "BOMs can be linked to engineering projects to track product structure development."},
     {"category": "hr", "key": "timesheet_deadline", "value": "Timesheets are submitted weekly by end of day Friday and approved by the following Monday."},
     {"category": "hr", "key": "contract_renewal", "value": "Contract renewals are reviewed 30 days before expiry."},
 ]
