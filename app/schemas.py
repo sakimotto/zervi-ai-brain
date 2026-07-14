@@ -98,6 +98,7 @@ class FactCreate(BaseModel):
     category: str = "general"
     key: str
     value: str
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class FactOut(BaseModel):
@@ -106,6 +107,7 @@ class FactOut(BaseModel):
     category: str
     key: str
     value: str
+    metadata_json: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
 
     model_config = {"from_attributes": True, "json_encoders": {uuid.UUID: str}}

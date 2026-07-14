@@ -111,4 +111,5 @@ class Fact(Base):
     value = Column(Text, nullable=False)
     embedding = Column(Vector(EMBEDDING_DIM), nullable=True)
     is_shared = Column(Boolean, default=False, nullable=False)
+    metadata_json = Column(JSONB, nullable=False, default=dict)
     created_at = Column(DateTime, default=datetime.datetime.utcnow, nullable=False)

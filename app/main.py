@@ -1030,6 +1030,7 @@ async def create_fact(
         key=req.key,
         value=req.value,
         embedding=embedding,
+        metadata=req.metadata,
     )
     return schemas.FactOut.model_validate(fact)
 
