@@ -270,3 +270,43 @@ class TestAttachmentSchema:
         }
         req = schemas.ChatRequest(**payload)
         assert req.attachments[0].id == 7
+
+
+class TestBuildLlmMessagesWithAttachments:
+    async def test_build_llm_messages_does_not_shadow_attachments_module(
+        self, monkeypatch
+    ):
+        """Regression test: the attachments parameter must not shadow the module."""
+        from app.main import _build_llm_messages
+
+        async def fake_download(url, timeout=30.0):
+            return b"file text content"
+
+        monkeypatch.setattr("app.attachments._download_bytes", fake_download)
+
+        attachment_dicts = [
+            {
+                "id": 1,
+                "name": "notes.txt",
+                "mimetype": "text/plain",
+                "size": 100,
+                "access_url": "https://example.com/notes.txt",
+            }
+        ]
+
+        messages = await _build_llm_messages(
+            system_prompt="You are Saki.",
+            skill_schemas=[],
+            context={},
+            recent_messages=[],
+            relevant_snippets=[],
+            user_message="What is in this file?",
+            attachment_dicts=attachment_dicts,
+        )
+
+        # Should include system prompt, attachment context, and user message.
+        assert messages[0]["role"] == "system"
+        assert messages[0]["content"] == "You are Saki."
+        assert any("notes.txt" in msg.get("content", "") for msg in messages)
+        assert messages[-1]["role"] == "user"
+        assert "file text content" in messages[-1]["content"]

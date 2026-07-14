@@ -530,10 +530,10 @@ def _build_context_message(context: Dict[str, Any]) -> Dict[str, str]:
 
 
 async def _build_attachment_context_message(
-    attachments: List[Dict[str, Any]],
+    attachment_dicts: List[Dict[str, Any]],
 ) -> Optional[Dict[str, str]]:
     """Build a system message describing attached files and extracted text."""
-    context_text = await attachments.build_attachment_context(attachments)
+    context_text = await attachments.build_attachment_context(attachment_dicts)
     if not context_text:
         return None
     return {"role": "system", "content": context_text}
@@ -758,7 +758,7 @@ async def _build_llm_messages(
     recent_messages: List[Dict[str, str]],
     relevant_snippets: List[str],
     user_message: str,
-    attachments: Optional[List[Dict[str, Any]]] = None,
+    attachment_dicts: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """Assemble the message list sent to the LLM."""
     messages: List[Dict[str, Any]] = [{"role": "system", "content": system_prompt}]
@@ -790,15 +790,15 @@ async def _build_llm_messages(
             }
         )
 
-    if attachments:
-        attachment_context = await _build_attachment_context_message(attachments)
+    if attachment_dicts:
+        attachment_context = await _build_attachment_context_message(attachment_dicts)
         if attachment_context:
             messages.append(attachment_context)
 
     messages.extend(recent_messages)
 
-    if attachments:
-        processed = await attachments.process_attachments(attachments)
+    if attachment_dicts:
+        processed = await attachments.process_attachments(attachment_dicts)
         messages.append(attachments.build_user_message_with_attachments(user_message, processed))
     else:
         messages.append({"role": "user", "content": user_message})
