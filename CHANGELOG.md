@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `metadata_json` column on `facts` table with Alembic migration, plus `metadata` field on `FactCreate`/`FactOut` schemas. Enables the Odoo feedback loop to attach traceability metadata (message/chat IDs, active model/record) to user corrections.
+
+### Added
 - `/chat/stream` endpoint for Server-Sent Events (SSE) token-by-token replies.
 - Attachment support in `/chat` and `/chat/stream`:
   - `Attachment` schema and `attachments` field on `ChatRequest`.
