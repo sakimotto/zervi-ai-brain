@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New `/chat/analyze` endpoint for one-shot, no-tools analysis of tool results (used by Odoo to turn raw search/count data into natural-language answers).
 - New `Engineering_Tools` skill in `crud.ensure_default_agent_and_skills` exposing five engineering tools: `search_engineering_documents`, `list_open_engineering_tasks`, `create_engineering_project`, `add_engineering_task`, and `link_bom_to_project`.
 - System prompt extended with tools 12–16 for engineering project/document/BOM operations.
+- New `Engineering Agent` persona in `app/seed_data.py` with R&D/engineering system prompt, linked to `Engineering_Tools`, `Low_Risk_Tools`, and `Search_Tools`. Includes engineering document-control RAG document and facts.
 
 ### Changed
 - System prompt now includes `count_records` tool for aggregation/breakdown questions and instructs Saki to analyze tool results instead of echoing raw counts.
