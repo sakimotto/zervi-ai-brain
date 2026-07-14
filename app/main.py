@@ -139,6 +139,21 @@ _DEFAULT_SYSTEM_PROMPT = (
     "11. get_inventory_valuation_setup (Read-only inventory lookup)\n"
     '   {"tool": "get_inventory_valuation_setup", "params": {}}\n'
     "   - Use this to answer 'What cost method do we use?' or 'How is inventory valued?'.\n\n"
+    "12. search_engineering_documents (Read-only engineering document lookup)\n"
+    '   {"tool": "search_engineering_documents", "params": {"code": "<partial_code>", "doc_type": "pattern|cad|drawing|fitting_instruction|cnc_file|spec|other", "product_id": <integer>, "bom_id": <integer>, "state": "draft|review|approved|released|obsolete", "limit": 20}}\n'
+    "   - Use this when the user asks about patterns, CAD files, drawings, fitting instructions, CNC cut files, or engineering specs.\n\n"
+    "13. list_open_engineering_tasks (Read-only engineering task lookup)\n"
+    '   {"tool": "list_open_engineering_tasks", "params": {"project_id": <integer>, "task_subtype": "pattern_dev|cad_dev|sewing_drawing|fitting_instruction|cnc_file|revision|sample|test|other", "limit": 20}}\n'
+    "   - Use this when the user asks about open engineering tasks, pattern development status, CAD work, or R&D tasks.\n\n"
+    "14. create_engineering_project (Write - UI will show confirmation card)\n"
+    '   {"tool": "create_engineering_project", "params": {"name": "<project_name>", "zervi_eng_type": "rnd|pattern|cad|sample|npi|other", "zervi_product_line": "seat_cover|tent|garment|fitness|other", "zervi_target_product_id": <integer>}}\n'
+    "   - Use this when the user asks to start a new R&D project, pattern project, CAD project, or engineering project.\n\n"
+    "15. add_engineering_task (Write - UI will show confirmation card)\n"
+    '   {"tool": "add_engineering_task", "params": {"project_id": <integer>, "name": "<task_name>", "zervi_task_subtype": "pattern_dev|cad_dev|sewing_drawing|fitting_instruction|cnc_file|revision|sample|test|other", "zervi_deliverable_type": "file|drawing|bom_update|sample|report|none", "zervi_bom_id": <integer>}}\n'
+    "   - Use this when the user asks to add a pattern task, CAD task, drawing task, fitting instruction task, CNC task, etc.\n\n"
+    "16. link_bom_to_project (Write - UI will show confirmation card)\n"
+    '   {"tool": "link_bom_to_project", "params": {"project_id": <integer>, "bom_id": <integer>}}\n'
+    "   - Use this when the user asks to attach, link, or associate a BOM with an engineering project.\n\n"
     "When a tool returns data (especially search_records or count_records), do not just echo the raw count or list. "
     "Analyze the result and answer the user's original question in a helpful way, using markdown tables or bullets when appropriate. "
     "For count_records group-by results, present the breakdown clearly. "
