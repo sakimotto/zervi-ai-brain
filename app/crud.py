@@ -216,6 +216,73 @@ async def ensure_default_agent_and_skills(db: AsyncSession, default_prompt: str)
             ],
         },
         {
+            "name": "Engineering_Tools",
+            "tool_schemas_json": [
+                {
+                    "tool": "search_engineering_documents",
+                    "description": (
+                        "Search engineering documents (patterns, CAD files, drawings, fitting instructions, CNC cut files) by code, type, product, BOM, or state. "
+                        "Use this when the user asks about engineering documents, patterns, CAD, drawings, or CNC files."
+                    ),
+                    "params": {
+                        "code": "string (optional, partial document code)",
+                        "doc_type": "string (optional, one of: pattern, cad, drawing, fitting_instruction, cnc_file, spec, other)",
+                        "product_id": "integer product.template id (optional)",
+                        "bom_id": "integer mrp.bom id (optional)",
+                        "state": "string (optional, one of: draft, review, approved, released, obsolete)",
+                        "limit": "integer (optional, default 20, max 50)",
+                    },
+                },
+                {
+                    "tool": "list_open_engineering_tasks",
+                    "description": (
+                        "List open engineering tasks (pattern development, CAD development, sewing drawings, etc.) filtered by project or subtype. "
+                        "Use this when the user asks about open engineering work or R&D tasks."
+                    ),
+                    "params": {
+                        "project_id": "integer project.project id (optional)",
+                        "task_subtype": "string (optional, one of: pattern_dev, cad_dev, sewing_drawing, fitting_instruction, cnc_file, revision, sample, test, other)",
+                        "limit": "integer (optional, default 20, max 50)",
+                    },
+                },
+                {
+                    "tool": "create_engineering_project",
+                    "description": (
+                        "Create a new engineering/R&D project. Use this when the user asks to start a new R&D project, pattern project, CAD project, or engineering project."
+                    ),
+                    "params": {
+                        "name": "string (project name, required)",
+                        "zervi_eng_type": "string (one of: rnd, pattern, cad, sample, npi, other, default other)",
+                        "zervi_product_line": "string (one of: seat_cover, tent, garment, fitness, other, default other)",
+                        "zervi_target_product_id": "integer product.template id (optional)",
+                    },
+                },
+                {
+                    "tool": "add_engineering_task",
+                    "description": (
+                        "Add an engineering task to an existing project. Use this when the user asks to add a pattern task, CAD task, drawing task, fitting instruction task, CNC task, etc."
+                    ),
+                    "params": {
+                        "project_id": "integer project.project id (required)",
+                        "name": "string (task name, required)",
+                        "zervi_task_subtype": "string (one of: pattern_dev, cad_dev, sewing_drawing, fitting_instruction, cnc_file, revision, sample, test, other)",
+                        "zervi_deliverable_type": "string (one of: file, drawing, bom_update, sample, report, none, default none)",
+                        "zervi_bom_id": "integer mrp.bom id (optional)",
+                    },
+                },
+                {
+                    "tool": "link_bom_to_project",
+                    "description": (
+                        "Link a manufacturing BOM to an engineering project. Use this when the user asks to attach, link, or associate a BOM with a project."
+                    ),
+                    "params": {
+                        "project_id": "integer project.project id (required)",
+                        "bom_id": "integer mrp.bom id (required)",
+                    },
+                },
+            ],
+        },
+        {
             "name": "Purchasing_Tools",
             "tool_schemas_json": [
                 {
