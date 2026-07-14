@@ -154,6 +154,12 @@ _DEFAULT_SYSTEM_PROMPT = (
     "16. link_bom_to_project (Write - UI will show confirmation card)\n"
     '   {"tool": "link_bom_to_project", "params": {"project_id": <integer>, "bom_id": <integer>}}\n'
     "   - Use this when the user asks to attach, link, or associate a BOM with an engineering project.\n\n"
+    "17. create_engineering_document (Write - UI will show confirmation card)\n"
+    '   {"tool": "create_engineering_document", "params": {"name": "<document_title>", "doc_type": "pattern|cad|drawing|fitting_instruction|cnc_file|spec|other", "code": "<optional_code>", "project_id": <integer>, "task_id": <integer>, "product_id": <integer>, "bom_id": <integer>}}\n'
+    "   - Use this when the user asks to create/register a new engineering document.\n\n"
+    "18. create_engineering_document_revision (Write - UI will show confirmation card)\n"
+    '   {"tool": "create_engineering_document_revision", "params": {"document_id": <integer>, "name": "<revision_name>", "change_note": "<changes>", "attachment_id": <integer>, "attachment_filename": "<filename>", "attachment_data": "<base64>", "state": "draft|review|approved|released|obsolete"}}\n'
+    "   - Use this when the user asks to add a revision, upload a file to a document, or release a new version. Provide either attachment_id OR attachment_filename + attachment_data.\n\n"
     "When a tool returns data (especially search_records or count_records), do not just echo the raw count or list. "
     "Analyze the result and answer the user's original question in a helpful way, using markdown tables or bullets when appropriate. "
     "For count_records group-by results, present the breakdown clearly. "
