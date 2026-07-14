@@ -6,12 +6,13 @@ from pydantic import BaseModel, Field
 
 
 class Attachment(BaseModel):
-    id: int
+    id: int = Field(..., validation_alias="attachment_id")
     name: str
     mimetype: str
     size: Optional[int] = None
-    access_url: str = Field(..., alias="access_url")
-    extracted_text: Optional[str] = Field(default=None, alias="extracted_text")
+    access_url: str
+    access_token: Optional[str] = None
+    extracted_text: Optional[str] = None
 
     model_config = {"populate_by_name": True}
 

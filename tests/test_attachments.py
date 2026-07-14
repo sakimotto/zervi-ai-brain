@@ -226,3 +226,47 @@ class TestBuildAttachmentContext:
         )
         assert "pic.png" in context
         assert "will be provided to the vision model" in context
+
+
+class TestAttachmentSchema:
+    def test_accepts_odoo_payload_with_attachment_id_and_access_token(self):
+        from app import schemas
+
+        payload = {
+            "message": "What is in this file?",
+            "user_id": 1,
+            "attachments": [
+                {
+                    "attachment_id": 42,
+                    "name": "report.pdf",
+                    "mimetype": "application/pdf",
+                    "size": 1234,
+                    "access_url": "https://example.com/web/content/42/token",
+                    "access_token": "secret-token",
+                    "extracted_text": None,
+                }
+            ],
+        }
+        req = schemas.ChatRequest(**payload)
+        assert len(req.attachments) == 1
+        att = req.attachments[0]
+        assert att.id == 42
+        assert att.access_token == "secret-token"
+
+    def test_accepts_canonical_id_field(self):
+        from app import schemas
+
+        payload = {
+            "message": "What is in this file?",
+            "user_id": 1,
+            "attachments": [
+                {
+                    "id": 7,
+                    "name": "notes.txt",
+                    "mimetype": "text/plain",
+                    "access_url": "https://example.com/7",
+                }
+            ],
+        }
+        req = schemas.ChatRequest(**payload)
+        assert req.attachments[0].id == 7
