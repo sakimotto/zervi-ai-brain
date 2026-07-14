@@ -112,26 +112,37 @@ _DEFAULT_SYSTEM_PROMPT = (
     '     domain: [["code", "=like", "113%"]]\n'
     "   - Use this to answer questions like 'Show me all 113* accounts' (res_model: \"account.account\", domain: [[\"code\", \"=like\", \"113%\"]]).\n"
     "   - Do not guess record IDs; always search or use the IDs in the provided context.\n\n"
-    "2. create_activity (Low risk)\n"
+    "2. count_records (Read-only counts and group-by)\n"
+    '   {"tool": "count_records", "params": {"res_model": "<model_name>", "domain": [["field", "operator", "value"], ...], "groupby": "<field_name>", "limit": 100}}\n'
+    "   - Use this for 'how many', 'count', 'number of', or breakdown questions.\n"
+    "   - Examples:\n"
+    '     count product.template grouped by categ_id to answer "how many products per category?"\n'
+    '     count sale.order with domain [["state","=","sale"]] to answer "how many confirmed orders?"\n'
+    "   - If the user asks for a count while a list is filtered, include the same domain/filter in the count.\n\n"
+    "3. create_activity (Low risk)\n"
     '   {"tool": "create_activity", "params": {"res_model": "<model_name>", "res_id": <integer>, "summary": "<string>", "note": "<string>", "date_deadline": "YYYY-MM-DD"}}\n\n'
-    "3. post_chatter_message (Low risk)\n"
+    "4. post_chatter_message (Low risk)\n"
     '   {"tool": "post_chatter_message", "params": {"res_model": "<model_name>", "res_id": <integer>, "message": "<string>", "message_type": "comment|note"}}\n\n'
-    "4. confirm_sales_order (HIGH RISK - UI will show confirmation card)\n"
+    "5. confirm_sales_order (HIGH RISK - UI will show confirmation card)\n"
     '   {"tool": "confirm_sales_order", "params": {"res_model": "sale.order", "res_id": <integer>, "confirmation_message": "<Explicit summary>"}}\n\n'
-    "5. validate_picking (HIGH RISK - UI will show confirmation card)\n"
+    "6. validate_picking (HIGH RISK - UI will show confirmation card)\n"
     '   {"tool": "validate_picking", "params": {"res_model": "stock.picking", "res_id": <integer>, "confirmation_message": "<Explicit summary>"}}\n\n'
-    "6. done_manufacturing_order (HIGH RISK - UI will show confirmation card)\n"
+    "7. done_manufacturing_order (HIGH RISK - UI will show confirmation card)\n"
     '   {"tool": "done_manufacturing_order", "params": {"res_model": "mrp.production", "res_id": <integer>, "confirmation_message": "<Explicit summary>"}}\n\n'
-    "7. confirm_purchase_order (HIGH RISK - UI will show confirmation card)\n"
+    "8. confirm_purchase_order (HIGH RISK - UI will show confirmation card)\n"
     '   {"tool": "confirm_purchase_order", "params": {"res_model": "purchase.order", "res_id": <integer>, "confirmation_message": "<Explicit summary>"}}\n\n'
-    "8. create_invoice (HIGH RISK - UI will show confirmation card)\n"
+    "9. create_invoice (HIGH RISK - UI will show confirmation card)\n"
     '   {"tool": "create_invoice", "params": {"res_model": "sale.order", "res_id": <integer>, "confirmation_message": "<Explicit summary>"}}\n\n'
-    "9. get_coa_summary (Read-only accounting lookup)\n"
+    "10. get_coa_summary (Read-only accounting lookup)\n"
     '   {"tool": "get_coa_summary", "params": {"prefix": "<code_prefix>"}}\n'
     "   - Use this to answer questions about the chart of accounts, e.g. inventory asset accounts (prefix '113'), expense accounts (prefix '5').\n\n"
-    "10. get_inventory_valuation_setup (Read-only inventory lookup)\n"
+    "11. get_inventory_valuation_setup (Read-only inventory lookup)\n"
     '   {"tool": "get_inventory_valuation_setup", "params": {}}\n'
     "   - Use this to answer 'What cost method do we use?' or 'How is inventory valued?'.\n\n"
+    "When a tool returns data (especially search_records or count_records), do not just echo the raw count or list. "
+    "Analyze the result and answer the user's original question in a helpful way, using markdown tables or bullets when appropriate. "
+    "For count_records group-by results, present the breakdown clearly. "
+    "If the data does not answer the question, say so and offer a follow-up search.\n\n"
     "For actions on multiple selected records, replace `res_id` with `res_ids` (array of integers) and set res_model accordingly.\n\n"
     "If the user's intent is genuinely unclear, ask for clarification in one concise sentence. Interpret obvious typos and shorthand."
 )
@@ -742,6 +753,63 @@ async def chat(
         raise
     except SQLAlchemyError as exc:
         raise HTTPException(status_code=500, detail=f"Database error: {exc}")
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"DeepSeek API error: {exc.response.status_code} - {exc.response.text}",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {exc}")
+
+
+@app.post("/chat/analyze", response_model=schemas.AnalyzeResponse)
+async def chat_analyze(
+    req: schemas.AnalyzeRequest,
+    request: Request,
+    x_ai_assistant_secret: Optional[str] = Header(None),
+    db: AsyncSession = Depends(get_db),
+) -> schemas.AnalyzeResponse:
+    """One-shot analysis endpoint for tool results.
+
+    Does not persist messages. Uses a no-tools system prompt so the LLM
+    answers the provided prompt directly instead of emitting tool calls.
+    """
+    _check_secret(x_ai_assistant_secret)
+    await check_chat_rate_limit(request, req.user_id)
+
+    if not DEEPSEEK_API_KEY:
+        raise HTTPException(status_code=500, detail="DeepSeek API key is not configured")
+
+    system_prompt = (
+        "You are Saki, a helpful ERP assistant. Answer the user's prompt directly using the data provided. "
+        "Do not call any tools. Use markdown tables or bullets when helpful. Be concise but specific."
+    )
+
+    try:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": req.prompt},
+        ]
+        async with httpx.AsyncClient() as client:
+            response = await _deepseek_post_with_retry(
+                client,
+                f"{DEEPSEEK_BASE_URL}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json_payload={
+                    "model": DEEPSEEK_MODEL,
+                    "messages": messages,
+                    "max_tokens": _MAX_TOKENS_CHAT,
+                },
+                timeout=60.0,
+            )
+        data = response.json()
+        raw_reply = data["choices"][0]["message"]["content"]
+        return schemas.AnalyzeResponse(reply=raw_reply.strip() or None)
+    except HTTPException:
+        raise
     except httpx.HTTPStatusError as exc:
         raise HTTPException(
             status_code=502,
