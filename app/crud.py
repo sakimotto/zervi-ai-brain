@@ -197,7 +197,22 @@ async def ensure_default_agent_and_skills(db: AsyncSession, default_prompt: str)
                         "limit": "integer (optional, default 50, max 100)",
                         "fields": "list of field names to read (optional, e.g. ['code','name','account_type'])",
                     },
-                }
+                },
+                {
+                    "tool": "count_records",
+                    "description": (
+                        "Count Odoo records, optionally grouped by a field. "
+                        "Use this whenever the user asks 'how many', 'count', 'number of', or wants a breakdown by category/status/etc. "
+                        "Examples: count product.template grouped by categ_id to see how many products per category; "
+                        "count sale.order with domain [['state','=','sale']] to see confirmed orders."
+                    ),
+                    "params": {
+                        "res_model": "string (Odoo model technical name, e.g. 'product.template')",
+                        "domain": "list of domain tuples (optional)",
+                        "groupby": "string field name to group by (optional, e.g. 'categ_id')",
+                        "limit": "integer (optional, max 100 groups)",
+                    },
+                },
             ],
         },
         {
@@ -241,6 +256,13 @@ async def ensure_default_agent_and_skills(db: AsyncSession, default_prompt: str)
             )
             db.add(skill)
             await db.flush()
+        else:
+            # Refresh default skill schemas on startup so new tools are added
+            # to existing deployments. Custom skills (not in default_skills)
+            # are left untouched.
+            if skill.tool_schemas_json != skill_data["tool_schemas_json"]:
+                skill.tool_schemas_json = skill_data["tool_schemas_json"]
+                await db.flush()
         skill_records.append(skill)
 
     skill_by_name = {skill.name: skill for skill in skill_records}

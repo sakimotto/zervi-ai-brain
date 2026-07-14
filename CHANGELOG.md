@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `metadata_json` column on `facts` table with Alembic migration, plus `metadata` field on `FactCreate`/`FactOut` schemas. Enables the Odoo feedback loop to attach traceability metadata (message/chat IDs, active model/record) to user corrections.
+- New `/chat/analyze` endpoint for one-shot, no-tools analysis of tool results (used by Odoo to turn raw search/count data into natural-language answers).
+
+### Changed
+- System prompt now includes `count_records` tool for aggregation/breakdown questions and instructs Saki to analyze tool results instead of echoing raw counts.
 
 ### Added
 - `/chat/stream` endpoint for Server-Sent Events (SSE) token-by-token replies.

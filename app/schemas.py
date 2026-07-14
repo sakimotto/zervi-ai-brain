@@ -38,6 +38,16 @@ class ChatResponse(BaseModel):
     sources: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
 
 
+class AnalyzeRequest(BaseModel):
+    prompt: str
+    user_id: int
+    context: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AnalyzeResponse(BaseModel):
+    reply: Optional[str] = None
+
+
 class SuggestRequest(BaseModel):
     user_id: int
     session_id: Optional[str] = None
